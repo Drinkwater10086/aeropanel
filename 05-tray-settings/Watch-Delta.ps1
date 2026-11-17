@@ -1,4 +1,4 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
 $log = Join-Path $root 'error.log'
 $modePath = Join-Path $root 'original-mode.xml'
