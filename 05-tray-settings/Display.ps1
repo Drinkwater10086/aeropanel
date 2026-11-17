@@ -1,4 +1,4 @@
-param([switch]$Restore, [switch]$Check, [switch]$Library)
+﻿param([switch]$Restore, [switch]$Check, [switch]$Library)
 $ErrorActionPreference = 'Stop'
 Add-Type -TypeDefinition @'
 using System;
