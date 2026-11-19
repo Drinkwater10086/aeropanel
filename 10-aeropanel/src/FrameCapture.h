@@ -1,18 +1,19 @@
-#pragma once
+﻿#pragma once
+#include <tlhelp32.h>
 // PresentMon 2.3.1 --output_stdout --v1_metrics, verified against actual CSV.
 static HANDLE fpsProcess=NULL,fpsPipe=NULL,fpsErrorPipe=NULL,fpsJob=NULL;
 static DWORD fpsTarget=0,lastForeground=0,configuredTarget=0;
 static bool fixedFpsTarget=false,captureEnabled=true;
 static std::wstring fpsTargetName,foregroundName;
 static std::string csvPending,errorPending,lastCaptureError;
-static int pidColumn=-1,msColumn=-1,appColumn=-1,chainColumn=-1;
+static int pidColumn=-1,msColumn=-1,appColumn=-1,chainColumn=-1,runtimeColumn=-1;
 static std::deque<double> frameTimes;
 static double totalMs=0;
 static unsigned long long totalFrames=0;
 static ULONGLONG lastFrameTick=0,captureStarted=0;
 static std::wstring fpsStatus=L"FPS：正在启动采集";
 struct RecentFrame{double ms;ULONGLONG tick;};
-struct FrameStream{std::wstring name;std::deque<RecentFrame> recent;ULONGLONG last=0;};
+struct FrameStream{std::wstring name,runtime;std::deque<RecentFrame> recent;ULONGLONG last=0;};
 using FrameKey=std::pair<DWORD,std::string>;
 static std::map<FrameKey,FrameStream> streams;
 static FrameKey activeStream={0,""};
@@ -27,6 +28,13 @@ static std::vector<std::string> CsvRow(const std::string& line){
 static std::wstring ProcessName(DWORD pid){
     HANDLE p=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,FALSE,pid);wchar_t text[MAX_PATH]=L"";DWORD n=MAX_PATH;
     if(p){QueryFullProcessImageNameW(p,0,text,&n);CloseHandle(p);}
+    if(!text[0]){
+        HANDLE snapshot=CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS,0);
+        if(snapshot!=INVALID_HANDLE_VALUE){PROCESSENTRY32W item={};item.dwSize=sizeof(item);
+            if(Process32FirstW(snapshot,&item))do{if(item.th32ProcessID==pid){wcsncpy(text,item.szExeFile,MAX_PATH-1);break;}}while(Process32NextW(snapshot,&item));
+            CloseHandle(snapshot);
+        }
+    }
     wchar_t* slash=wcsrchr(text,L'\\');return slash?slash+1:text;
 }
 static bool EligibleAutomatic(const FrameStream& stream){
@@ -40,7 +48,29 @@ static void TrackForeground(){
     lastForeground=pid;foregroundName=ProcessName(pid);
 }
 static bool IsFrameSource(DWORD id){return id>=0x50&&id<=0x56;}
+static bool DesktopIdle(){
+    if(!captureEnabled||fixedFpsTarget||configuredTarget)return false;
+    const wchar_t* desktopNames[]={L"explorer.exe",L"ShellExperienceHost.exe",L"StartMenuExperienceHost.exe",L"SearchHost.exe"};
+    for(auto name:desktopNames)if(!_wcsicmp(foregroundName.c_str(),name))return true;
+    if(!fpsProcess||pidColumn<0)return false;
+    ULONGLONG now=GetTickCount64();
+    for(const auto& entry:streams)if(EligibleAutomatic(entry.second)&&now-entry.second.last<=2500)return false;
+    return true;
+}
+static std::wstring FrameApiLabel(){
+    if(DesktopIdle())return L"GDI";
+    auto found=streams.find(activeStream);
+    if(found==streams.end()||GetTickCount64()-found->second.last>2500)return L"FPS";
+    auto detected=DetectedApi(activeStream.first);if(!detected.empty())return detected;
+    const auto& runtime=found->second.runtime;
+    if(runtime==L"D3D9")return L"D3D9";
+    if(runtime==L"DXGI")return L"DXGI";
+    // Kernel-only presents cannot reliably identify a graphics API.
+    return L"FPS";
+}
 static double FrameValue(DWORD id){
+    // Desktop values describe this OSD's fixed 1 Hz refresh, not game rendering latency.
+    if(DesktopIdle())return id==0x51?1000.0:IsFrameSource(id)?1.0:HUGE_VAL;
     if(!fpsProcess||frameTimes.empty()||GetTickCount64()-lastFrameTick>2500)return HUGE_VAL;
     double sum=0;for(double v:frameTimes)sum+=v;
     if(sum<=0)return HUGE_VAL;
@@ -90,15 +120,17 @@ static void ParseFrameLine(const std::string& line){
         if(!_stricmp(fields[i].c_str(),"ProcessID"))pidColumn=(int)i;
         if(!_stricmp(fields[i].c_str(),"msBetweenPresents"))msColumn=(int)i;
         if(!_stricmp(fields[i].c_str(),"Application"))appColumn=(int)i;
+        if(!_stricmp(fields[i].c_str(),"Runtime"))runtimeColumn=(int)i;
         if(!_stricmp(fields[i].c_str(),"SwapChainAddress"))chainColumn=(int)i;
     }if(pidColumn>=0&&msColumn>=0)Log(L"PresentMon schema verified: ProcessID, msBetweenPresents, SwapChainAddress.");return;}
-    int required=std::max(std::max(pidColumn,msColumn),std::max(appColumn,chainColumn));
+    int required=std::max(std::max(pidColumn,msColumn),std::max(std::max(appColumn,chainColumn),runtimeColumn));
     if(msColumn<0||(int)fields.size()<=required)return;
     DWORD pid=strtoul(fields[pidColumn].c_str(),NULL,10);if(!pid||pid==GetCurrentProcessId())return;
     double ms=strtod(fields[msColumn].c_str(),NULL);if(!(ms>0&&ms<10000&&isfinite(ms)))return;
     FrameKey key={pid,chainColumn>=0?fields[chainColumn]:""};
     if(streams.size()>=128&&streams.find(key)==streams.end())return;
     auto& stream=streams[key];
+    if(runtimeColumn>=0)stream.runtime=Wide(fields[runtimeColumn].c_str(),fields[runtimeColumn].size());
     if(stream.name.empty()){stream.name=appColumn>=0?Wide(fields[appColumn].c_str(),fields[appColumn].size()):L"";
         if(stream.name.empty()||stream.name==L"<unknown>")stream.name=ProcessName(pid);
         size_t slash=stream.name.find_last_of(L"\\/");if(slash!=std::wstring::npos)stream.name.erase(0,slash+1);
@@ -109,6 +141,7 @@ static void ParseFrameLine(const std::string& line){
     if(key==activeStream){frameTimes.push_back(ms);if(frameTimes.size()>4096)frameTimes.pop_front();totalMs+=ms;++totalFrames;lastFrameTick=tick;}
 }
 static void ReadFrames(){
+    ReadApi();
     if(!fpsProcess){if(!captureEnabled)fpsStatus=L"FPS：采集已关闭";return;}
     DWORD available=0;char buffer[16384];
     for(int n=0;n<64&&PeekNamedPipe(fpsPipe,NULL,0,NULL,&available,NULL)&&available;++n){
@@ -127,6 +160,7 @@ static void ReadFrames(){
     }
     ULONGLONG now=GetTickCount64();for(auto it=streams.begin();it!=streams.end();)if(now-it->second.last>10000)it=streams.erase(it);else ++it;
     SelectFrameStream();DWORD code=0;
+    if(pidColumn<0&&now-captureStarted>8000)fpsStatus=L"帧率数据暂不可用：采集器未收到画面帧";
     if(GetExitCodeProcess(fpsProcess,&code)&&code!=STILL_ACTIVE){
         CloseHandle(fpsProcess);fpsProcess=NULL;if(fpsPipe)CloseHandle(fpsPipe);fpsPipe=NULL;
         if(fpsErrorPipe)CloseHandle(fpsErrorPipe);fpsErrorPipe=NULL;if(fpsJob)CloseHandle(fpsJob);fpsJob=NULL;
@@ -137,6 +171,7 @@ static void ReadFrames(){
 static std::wstring PresentMonPath(){return std::wstring(folder)+L"\\runtime\\PresentMon.exe";}
 static std::wstring SessionName(){return L"AeroPanel-"+std::to_wstring(GetCurrentProcessId());}
 static void StopFrames(){
+    StopApi();
     if(!fpsProcess)return;
     std::wstring command=L"\""+PresentMonPath()+L"\" --session_name "+SessionName()+L" --terminate_existing_session";
     STARTUPINFOW si={sizeof(si)};PROCESS_INFORMATION pi={};si.dwFlags=STARTF_USESHOWWINDOW;si.wShowWindow=SW_HIDE;
@@ -167,7 +202,8 @@ static void StartFrames(){
     fpsJob=CreateJobObjectW(NULL,NULL);if(fpsJob){JOBOBJECT_EXTENDED_LIMIT_INFORMATION limit={};limit.BasicLimitInformation.LimitFlags=JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
         SetInformationJobObject(fpsJob,JobObjectExtendedLimitInformation,&limit,sizeof(limit));AssignProcessToJobObject(fpsJob,pi.hProcess);}
     fpsProcess=pi.hProcess;ResumeThread(pi.hThread);CloseHandle(pi.hThread);
-    csvPending.clear();errorPending.clear();lastCaptureError.clear();pidColumn=msColumn=appColumn=chainColumn=-1;
+    csvPending.clear();errorPending.clear();lastCaptureError.clear();pidColumn=msColumn=appColumn=chainColumn=runtimeColumn=-1;
     frameTimes.clear();streams.clear();activeStream={0,""};totalMs=0;totalFrames=0;lastFrameTick=0;captureStarted=GetTickCount64();fpsStatus=L"FPS：正在等待帧事件";
+    StartApi();
     Log(L"Independent PresentMon capture started.");
 }

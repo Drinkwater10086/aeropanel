@@ -1,4 +1,4 @@
-#define wWinMain SuiteEntryNotUsed
+﻿#define wWinMain SuiteEntryNotUsed
 #include "../src/AeroPanel.cpp"
 #undef wWinMain
 #include <assert.h>
@@ -121,6 +121,46 @@ static void FrameTests(){
     ParseFrameLine("game.exe,42,0,Other,0");ParseFrameLine("game.exe,42,0,Other,nan");
     Check(frameTimes.size()==1,"invalid_frame_intervals_ignored");lastFrameTick=GetTickCount64()-3000;
     Check(!isfinite(FrameValue(0x50)),"stale_fps_not_reused");fpsProcess=NULL;configuredTarget=0;
+    fpsProcess=GetCurrentProcess();streams.clear();frameTimes.clear();pidColumn=1;
+    Check(FrameValue(0x50)==1.0&&FrameValue(0x51)==1000.0&&FrameApiLabel()==L"GDI","desktop_gdi_one_hz_refresh_values");
+    auto& background=streams[{42,"background"}];background.name=L"game.exe";background.last=GetTickCount64();background.recent.push_back({5.0,background.last});
+    foregroundName=L"explorer.exe";Check(DesktopIdle()&&FrameValue(0x51)==1000.0,"desktop_foreground_does_not_reuse_background_game_fps");
+    pidColumn=-1;
+    Check(FrameValue(0x50)==1.0&&FrameValue(0x51)==1000.0,"desktop_refresh_available_before_capture_schema");
+    pidColumn=1;
+    foregroundName.clear();streams.clear();
+    configuredTarget=42;Check(!isfinite(FrameValue(0x50)),"pinned_target_never_uses_desktop_fallback");configuredTarget=0;
+    pidColumn=-1;Check(!isfinite(FrameValue(0x50)),"capture_without_schema_never_fakes_one_fps");
+    pidColumn=msColumn=appColumn=chainColumn=runtimeColumn=-1;
+    ParseFrameLine("Application,ProcessID,SwapChainAddress,Runtime,msBetweenPresents");
+    ParseFrameLine("game.exe,42,0,DXGI,5");configuredTarget=42;SelectFrameStream();
+    Check(FrameApiLabel()==L"DXGI"&&FrameValue(0x50)==200.0,"runtime_label_and_live_fps");
+    ParseFrameLine("game.exe,42,0,D3D9,5");Check(FrameApiLabel()==L"D3D9","d3d9_runtime_label");
+    ParseFrameLine("game.exe,42,0,Other,5");Check(FrameApiLabel()==L"FPS","unknown_api_is_not_guessed");
+    fpsProcess=NULL;configuredTarget=0;
+    Check(apiidentity::StackMask({L"d3d11.dll",L"d3d10.dll"})==2,"api_d3d10_wrapper_not_mislabeled_d3d11");
+    Check(apiidentity::StackMask({L"D3D11.dll"})==8,"api_case_insensitive_stack_module");
+    Check(apiidentity::StackMask({L"nvoglv64.dll"})==0,"shared_driver_module_is_not_api_evidence");
+    Check(apiidentity::Names(32|64)==L"OpenGL/Vulkan","mixed_api_evidence_retains_both_names");
+    DWORD ownPid=GetCurrentProcessId();auto ownIdentity=apiidentity::ProcessIdentity(ownPid);
+    apiEvidence[ownPid]={ownIdentity,16};Check(DetectedApi(ownPid)==L"D3D12","api_evidence_matches_process_creation_time");
+    apiEvidence[ownPid]={ownIdentity+1,8};Check(DetectedApi(ownPid).empty(),"pid_reuse_cannot_reuse_old_api_evidence");
+    Check(EnsureApiRuntime(),"single_exe_extracts_verified_api_detector");
+    StartApi();Check(apiProcess&&apiPipe&&apiStop,"api_detector_starts_with_owned_pipe_and_stop_event");
+    HANDLE detector=apiProcess;HANDLE detectorCopy=NULL;DuplicateHandle(GetCurrentProcess(),detector,GetCurrentProcess(),&detectorCopy,SYNCHRONIZE,FALSE,0);
+    StopApi();Check(!apiProcess&&!apiPipe&&!apiStop&&detectorCopy&&WaitForSingleObject(detectorCopy,0)==WAIT_OBJECT_0,"api_detector_stops_and_releases_handles");if(detectorCopy)CloseHandle(detectorCopy);
+    apiEvidence[ownPid]={ownIdentity,16};SaveApiEvidence(ownPid,apiEvidence[ownPid]);apiEvidence.clear();LoadApiEvidence();
+    Check(DetectedApi(ownPid)==L"D3D12","verified_api_cache_survives_detector_restart");
+    WritePrivateProfileStringW(L"APICache",std::to_wstring(ownPid).c_str(),(std::to_wstring(ownIdentity+1)+L",8").c_str(),iniPath);LoadApiEvidence();
+    Check(DetectedApi(ownPid).empty(),"stale_api_cache_is_removed_on_load");
+    StartApiChannel(apiBroker,true,false);ULONGLONG deadline=GetTickCount64()+3000;
+    while(!ConnectedApi(apiBroker)&&GetTickCount64()<deadline)Sleep(10);
+    HMODULE graphics=LoadLibraryW(L"d3d11.dll");auto address=graphics?GetProcAddress(graphics,"D3D11CreateDevice"):NULL;
+    std::string query="STACK,"+std::to_string(ownPid)+","+std::to_string(ownIdentity)+","+std::to_string((ULONGLONG)(uintptr_t)address)+"\n";DWORD sent=0;
+    bool sentOk=ConnectedApi(apiBroker)&&WriteFile(apiBroker.pipe,query.data(),(DWORD)query.size(),&sent,NULL)&&sent==query.size();
+    deadline=GetTickCount64()+3000;while(DetectedApi(ownPid).empty()&&GetTickCount64()<deadline){ReadApiChannel(apiBroker);Sleep(10);}
+    Check(sentOk&&DetectedApi(ownPid)==L"D3D11","module_mapping_broker_round_trip_and_client_pid_check");
+    StopApi();if(graphics)FreeLibrary(graphics);
     Check(EnsureCaptureRuntime(),"single_exe_extracts_verified_capture_runtime");
     Check(EnsureCaptureRuntime(),"existing_capture_runtime_verified_and_reused");
     FILE* recorded=_wfopen((std::wstring(folder)+L"\\..\\tests\\game-fixture.csv").c_str(),L"rb");
@@ -139,18 +179,53 @@ static void FrameTests(){
     double fullMs=benchmark(true),partialMs=benchmark(false);(void)sink;
     fprintf(results,"BENCH percentile_2000_iterations full_sort_ms=%.3f partial_selection_ms=%.3f speed_ratio=%.3f\n",fullMs,partialMs,fullMs/partialMs);
 }
+static bool SaveSettingsPreview(HWND window){
+    RECT r;GetClientRect(window,&r);BITMAPINFO info={};info.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);
+    info.bmiHeader.biWidth=r.right;info.bmiHeader.biHeight=-r.bottom;info.bmiHeader.biPlanes=1;info.bmiHeader.biBitCount=32;
+    HDC dc=CreateCompatibleDC(NULL);void* pixels=NULL;
+    HBITMAP bitmap=CreateDIBSection(dc,&info,DIB_RGB_COLORS,&pixels,NULL,0);
+    if(!dc||!bitmap){if(bitmap)DeleteObject(bitmap);if(dc)DeleteDC(dc);return false;}
+    HGDIOBJ old=SelectObject(dc,bitmap);
+    ShowWindow(window,SW_SHOWNOACTIVATE);UpdateWindow(window);
+    PrintWindow(window,dc,PW_CLIENTONLY);GdiFlush();
+    ShowWindow(window,SW_HIDE);
+    RECT list;GetWindowRect(sensorList,&list);POINT listPoint={list.right-5,(list.top+list.bottom)/2};ScreenToClient(window,&listPoint);
+    bool ok=GetPixel(dc,r.right-4,r.bottom-4)!=RGB(0,0,0)&&GetPixel(dc,listPoint.x,listPoint.y)==RGB(35,39,45);
+    std::wstring path=std::wstring(folder)+L"\\settings-preview.bmp";FILE* file=_wfopen(path.c_str(),L"wb");
+    if(file){BITMAPFILEHEADER header={};header.bfType=0x4D42;header.bfOffBits=sizeof(header)+sizeof(BITMAPINFOHEADER);
+        DWORD bytes=r.right*r.bottom*4;header.bfSize=header.bfOffBits+bytes;
+        ok=ok&&fwrite(&header,sizeof(header),1,file)==1&&fwrite(&info.bmiHeader,sizeof(info.bmiHeader),1,file)==1&&fwrite(pixels,bytes,1,file)==1;fclose(file);
+    }else ok=false;
+    SelectObject(dc,old);DeleteObject(bitmap);DeleteDC(dc);return ok;
+}
 static void UiTests(){
     fontHandle=CreateFontW(-16,0,0,0,FW_NORMAL,0,0,0,DEFAULT_CHARSET,0,0,0,0,L"Microsoft YaHei UI");settingsBrush=CreateSolidBrush(RGB(35,39,45));
     WNDCLASSW wc={};wc.hInstance=appInstance;wc.lpfnWndProc=PickerProc;wc.lpszClassName=L"SuiteTestsPicker";RegisterClassW(&wc);
-    ReadSensors();
+    ReadSensors();SetLocal(L"SilverWolfBackground",1);
+    HICON icon=CreateTrayIcon();ICONINFO iconInfo={};
+    Check(icon&&GetIconInfo(icon,&iconInfo),"silver_wolf_tray_icon_resource_loads");
+    if(iconInfo.hbmColor)DeleteObject(iconInfo.hbmColor);if(iconInfo.hbmMask)DeleteObject(iconInfo.hbmMask);if(icon)DestroyIcon(icon);
     picker=CreateWindowExW(0,wc.lpszClassName,L"Suite test",WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,0,0,750,700,NULL,NULL,appInstance,NULL);
     Check(picker&&GetDlgItem(picker,80)&&GetDlgItem(picker,81)&&GetDlgItem(picker,115),"two_sections_created_in_same_window");
+    Check(settingsArtworkDC&&settingsArtworkWidth==640&&settingsArtworkHeight==480,"preblurred_background_loaded_at_fixed_size");
+    BITMAP artwork={};GetObjectW(settingsArtworkBitmap,sizeof(artwork),&artwork);
+    fprintf(results,"INFO background_bitmap_bytes=%ld runtime_blur_passes=0\n",artwork.bmWidthBytes*artwork.bmHeight);
+    SendMessageW(GetDlgItem(picker,83),BM_SETCHECK,BST_UNCHECKED,0);SendMessageW(picker,WM_COMMAND,83,0);
+    Check(!settingsArtworkDC&&!settingsArtworkBitmap&&Setting(L"SilverWolfBackground",1)==0,"background_toggle_off_releases_bitmap_and_saves_setting");
+    SendMessageW(GetDlgItem(picker,83),BM_SETCHECK,BST_CHECKED,0);SendMessageW(picker,WM_COMMAND,83,0);
+    Check(settingsArtworkDC&&Setting(L"SilverWolfBackground",0)==1,"background_toggle_on_reloads_bitmap");
     SelectSettingsSection(1);Check((GetWindowLongW(GetDlgItem(picker,100),GWL_STYLE)&WS_VISIBLE)&&!(GetWindowLongW(GetDlgItem(picker,10),GWL_STYLE)&WS_VISIBLE),"resolution_tab_hides_monitor_controls");
     int small=settingsFontPixels;SetWindowPos(picker,NULL,0,0,1920,1080,SWP_NOZORDER|SWP_NOACTIVATE);
     Check(settingsFontPixels>small,"settings_fonts_scale_up_with_window");
     SelectSettingsSection(0);Check((GetWindowLongW(sensorList,GWL_STYLE)&WS_VISIBLE)&&!(GetWindowLongW(GetDlgItem(picker,100),GWL_STYLE)&WS_VISIBLE),"monitor_tab_restores_its_controls");
+    SetWindowPos(picker,NULL,0,0,1000,850,SWP_NOZORDER|SWP_NOACTIVATE);
+    Check(SaveSettingsPreview(picker),"settings_window_renders_with_background_and_controls");
     bool fullscreenBefore=settingsFullscreen;ToggleSettingsFullscreen();Check(settingsFullscreen!=fullscreenBefore,"fullscreen_enter");ToggleSettingsFullscreen();Check(!settingsFullscreen,"fullscreen_exit_restores_window");
     DestroyWindow(picker);Check(!settingsFont&&!settingsPreviewFont,"closing_settings_releases_fonts");
+    Check(!settingsArtworkDC&&!settingsArtworkBitmap&&!settingsIconSmall&&!settingsIconLarge,"closing_settings_releases_artwork_and_icons");
+    DWORD handles=GetGuiResources(GetCurrentProcess(),GR_GDIOBJECTS);
+    for(int i=0;i<10;++i){HWND h=CreateWindowExW(0,wc.lpszClassName,L"Theme resource test",WS_OVERLAPPEDWINDOW,0,0,750,700,NULL,NULL,appInstance,NULL);if(h)DestroyWindow(h);}
+    Check(GetGuiResources(GetCurrentProcess(),GR_GDIOBJECTS)<=handles+2,"repeated_settings_open_close_does_not_accumulate_gdi_objects");
     DeleteObject(fontHandle);fontHandle=NULL;DeleteObject(settingsBrush);settingsBrush=NULL;
 }
 int wmain(int argc,wchar_t** argv){

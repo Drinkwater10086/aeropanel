@@ -1,4 +1,4 @@
-// Independent monitor: reads MAHMSharedMemory, never RTSS shared memory.
+﻿// Independent monitor: reads MAHMSharedMemory, never RTSS shared memory.
 // Optional PresentMon CLI captures frame timing in a uniquely named session.
 #define WIN32_LEAN_AND_MEAN
 #ifndef UNICODE
@@ -48,6 +48,7 @@ static void RefreshPanel();
 static void ShowMenu();
 static ULONGLONG quitAt=0;
 static std::wstring statusText;
+static std::wstring hardwareCaption=L"AEROPANEL / 硬件数据：MSI Afterburner";
 struct Sensor {
     std::wstring name,units;
     std::wstring key;
@@ -75,6 +76,7 @@ static void Log(const wchar_t* text) {
     FILE* f=_wfopen(logPath,L"a, ccs=UTF-8");if(f){fwprintf(f,L"%ls\n",text);fclose(f);}
 }
 #include "CaptureRuntime.h"
+#include "ApiRuntime.h"
 #include "FrameCapture.h"
 #include "ResolutionEngine.h"
 
@@ -113,6 +115,13 @@ static bool ReadSensors() {
     DWORD stamp=valid?Read32(view+20):0;
     if(valid) {
         next.reserve(count);
+        DWORD gpuCount=Read32(view+24),gpuStride=Read32(view+28);
+        ULONGLONG gpuOffset=(ULONGLONG)header+(ULONGLONG)stride*count;
+        std::map<DWORD,std::wstring> devices;
+        if(gpuCount<=64&&gpuStride>=1304&&gpuOffset+(ULONGLONG)gpuStride*gpuCount<=region.RegionSize){
+            for(DWORD i=0;i<gpuCount;++i)devices[i]=Wide((const char*)view+(size_t)gpuOffset+(size_t)i*gpuStride+520,260);
+        }
+        std::map<DWORD,bool> activeDevices;
         for(DWORD i=0;i<count;++i) {
             // Copy fixed fields to avoid retaining any pointers into another process's view.
             BYTE entry[1324];memcpy(entry,view+header+(size_t)i*stride,sizeof(entry));
@@ -126,7 +135,11 @@ static bool ReadSensors() {
             s.value=ReadFloat(entry+1300);s.valid=isfinite(s.value) && fabs(s.value)<FLT_MAX/2;
             if(IsFrameSource(s.source)){double v=FrameValue(s.source);s.value=(float)v;s.valid=isfinite(v);}
             if(s.gpu!=0xFFFFFFFFu && ((s.source<0x80 && !IsFrameSource(s.source)) ||
-                (s.source>=0xB0 && s.source<=0xF0))){wchar_t suffix[40];swprintf(suffix,40,L" [GPU %lu]",(unsigned long)s.gpu+1);s.name+=suffix;}
+                (s.source>=0xB0 && s.source<=0xF0))){
+                activeDevices[s.gpu]=true;
+                if(s.name.find(L"GPU")!=0){wchar_t suffix[40];swprintf(suffix,40,L" [GPU %lu]",(unsigned long)s.gpu+1);s.name+=suffix;}
+            }
+            if(s.source==0xA0&&s.name==L"CPU clock")s.name=L"CPU报告频率（Afterburner）";
             bool publishedSelection=(s.flags&1)!=0;
             // Disabling Afterburner's RTSS link also clears its shared OSD flags.
             // Read the existing monitoring selection without enabling the server.
@@ -139,6 +152,10 @@ static bool ReadSensors() {
                 GetPrivateProfileIntW(L"Sensors",s.key.c_str(),0,iniPath)!=0;
             next.push_back(s);
         }
+        hardwareCaption=L"AEROPANEL / ";
+        for(const auto& device:activeDevices){auto name=devices.find(device.first);
+            if(name!=devices.end()&&!name->second.empty())hardwareCaption+=L"GPU"+std::to_wstring(device.first+1)+L" · "+name->second+L"  ";}
+        if(activeDevices.empty())hardwareCaption+=L"硬件数据：MSI Afterburner";
     }
     UnmapViewOfFile(view);CloseHandle(map);
     if(!valid){statusText=L"Afterburner 共享内存格式不匹配。";next.clear();PublishSensors(next);return false;}
@@ -166,6 +183,7 @@ static void LoadSettings() {
     clickThrough=Setting(L"ClickThrough",1)!=0;
     fontSize=Clamp(Setting(L"FontSize",26),12,36);
     captureEnabled=GetPrivateProfileIntW(L"Capture",L"Enabled",1,iniPath)!=0;
+    apiAdmin=GetPrivateProfileIntW(L"Capture",L"APIAdmin",0,iniPath)!=0;
     configuredTarget=GetPrivateProfileIntW(L"Capture",L"TargetPID",0,iniPath);
 }
 static void ApplyAppearance() {
@@ -219,8 +237,10 @@ static void DrawCurve(HDC dc,const Sensor& sensor,int x,int y,int width,int heig
 static void PaintCompact(HDC dc,RECT rect) {
     HFONT old=(HFONT)SelectObject(dc,osdFont);SetBkMode(dc,TRANSPARENT);
     std::map<int,std::vector<const Sensor*>> groups;
+    int graphScope=Setting(L"GraphScope",0);
+    auto hasGraph=[&](const Sensor& s){return drawGraphs&&(graphScope==1||s.source==0x50||s.source==0x51);};
     int extra=11000;
-    for(const Sensor& s:sensors)if(s.selected){int group=extra++;
+    for(const Sensor& s:sensors)if(s.selected&&!hasGraph(s)){int group=extra++;
         DWORD gpu=s.gpu==0xFFFFFFFF?0:s.gpu;
         if(gpu<64){
             if(s.source==0||s.source==0x30||s.source==0x20||s.source==0x61||s.source==0x40)group=(int)gpu*2;
@@ -238,7 +258,7 @@ static void PaintCompact(HDC dc,RECT rect) {
             label=(group.first%2?L"MEM":L"GPU")+std::wstring(number);color=RGB(0,180,90);}
         else if(group.first==10000)label=L"CPU";
         else if(group.first==10001)label=L"RAM";
-        else if(group.first==10002){label=L"FPS";color=RGB(195,125,150);}
+        else if(group.first==10002){label=FrameApiLabel();color=RGB(195,125,150);}
         else label=group.second.front()->name;
         OutlinedText(dc,0,y,label,color);SIZE size;
         GetTextExtentPoint32W(dc,label.c_str(),(int)label.size(),&size);
@@ -257,13 +277,19 @@ static void PaintCompact(HDC dc,RECT rect) {
         }y+=line;
     }
     if(!statusText.empty()){OutlinedText(dc,0,y,statusText,RGB(255,145,0));y+=line;}
-    if(groups.empty()&&statusText.empty())OutlinedText(dc,0,y,L"托盘右键 → 选择传感器",RGB(255,145,0));
-    bool frameSelected=false;for(const Sensor& s:sensors)if(s.selected&&IsFrameSource(s.source))frameSelected=true;
-    if(frameSelected&&(!fpsProcess||!isfinite(FrameValue(0x50)))){HFONT f=(HFONT)SelectObject(dc,fontHandle);OutlinedText(dc,0,y,fpsStatus,RGB(190,190,190));SelectObject(dc,f);y+=22;}
-    int graphScope=Setting(L"GraphScope",0);
-    if(drawGraphs)for(const Sensor& s:sensors)if(s.selected&&(graphScope==1||s.source==0x50||s.source==0x51)&&y+line+42<rect.bottom){
-        OutlinedText(dc,0,y,s.source==0x50?L"Framerate":s.source==0x51?L"Frametime":s.name,RGB(195,125,150));
-        y+=line;DrawCurve(dc,s,0,y,std::min(330,panelWidth),36,RGB(195,125,150));y+=44;}
+    if(groups.empty()&&statusText.empty()&&!drawGraphs)OutlinedText(dc,0,y,L"托盘右键 → 选择传感器",RGB(255,145,0));
+    if(drawGraphs)for(const Sensor& s:sensors)if(s.selected&&hasGraph(s)&&y+line+42<rect.bottom){
+        std::wstring graphTitle=s.source==0x50?L"Framerate":s.source==0x51?L"Frametime":s.name;
+        if(s.source==0x50){auto api=FrameApiLabel();if(api!=L"FPS")graphTitle+=L" · "+api;}
+        OutlinedText(dc,0,y,graphTitle,RGB(195,125,150));
+        y+=line;
+        std::wstring graphValue=ValueText(s);SIZE valueSize={};
+        GetTextExtentPoint32W(dc,graphValue.c_str(),(int)graphValue.size(),&valueSize);
+        int curveWidth=std::min(330,std::max(0,(int)rect.right-(int)valueSize.cx-14));
+        if(curveWidth>=12)DrawCurve(dc,s,0,y,curveWidth,36,RGB(195,125,150));
+        OutlinedText(dc,curveWidth+10,y+std::max(0,(36-(int)valueSize.cy)/2),graphValue,
+            s.valid?RGB(255,145,0):RGB(165,165,165));
+        y+=std::max(44,(int)valueSize.cy+8);}
     SelectObject(dc,old);
 }
 static void PaintPanel(HDC dc,RECT rect) {
@@ -290,6 +316,8 @@ static void PaintPanel(HDC dc,RECT rect) {
 }
 static void RefreshPanel() {
     if(!panelVisible)return;
+    static ULONGLONG lastDesktopPaint=0;ULONGLONG now=GetTickCount64();
+    if(DesktopIdle()){if(lastDesktopPaint&&now-lastDesktopPaint<1000)return;lastDesktopPaint=now;}else lastDesktopPaint=0;
     if(!transparentBackground){InvalidateRect(panel,NULL,FALSE);return;}
     if(!layerDC||layerWidth!=panelWidth||layerHeight!=panelHeight){
         ReleaseLayer();HDC screen=GetDC(NULL);layerDC=CreateCompatibleDC(screen);
@@ -340,7 +368,10 @@ static bool VerifyCurveRendering(){
     }
     history.erase(sensor.key);SelectObject(dc,old);DeleteObject(bitmap);DeleteDC(dc);return ok;
 }
+#include "Theme.h"
 static HICON CreateTrayIcon() {
+    HICON artwork=(HICON)LoadImageW(appInstance,MAKEINTRESOURCEW(101),IMAGE_ICON,32,32,0);
+    if(artwork)return artwork;
     HDC screen=GetDC(NULL),dc=CreateCompatibleDC(screen);BITMAPINFO info={};
     info.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);info.bmiHeader.biWidth=32;info.bmiHeader.biHeight=-32;
     info.bmiHeader.biPlanes=1;info.bmiHeader.biBitCount=32;void* pixels=NULL;
@@ -431,6 +462,7 @@ static void LayoutPicker(HWND h){
     MoveWindow(GetDlgItem(h,80),px(12),px(5),px(150),px(30),FALSE);
     MoveWindow(GetDlgItem(h,81),px(174),px(5),px(170),px(30),FALSE);
     MoveWindow(GetDlgItem(h,82),width-px(124),px(5),px(112),px(30),FALSE);
+    MoveWindow(GetDlgItem(h,83),px(356),px(5),px(160),px(30),FALSE);
     resolutionui::Layout(h,scale,width,height);
     RedrawWindow(h,NULL,NULL,RDW_INVALIDATE|RDW_ALLCHILDREN);
 }
@@ -457,8 +489,9 @@ static void ToggleSettingsFullscreen(){
 static LRESULT CALLBACK PickerProc(HWND h,UINT m,WPARAM w,LPARAM l){
     if(m==WM_CREATE){
         picker=h;
+        CreateSettingsTheme(h);
         BOOL dark=TRUE;DwmSetWindowAttribute(h,DWMWA_USE_IMMERSIVE_DARK_MODE,&dark,sizeof(dark));
-        HWND label=CreateWindowW(L"STATIC",L"AEROPANEL  /  On-Screen Display",WS_CHILD|WS_VISIBLE,12,10,600,24,h,(HMENU)15,appInstance,NULL);
+        HWND label=CreateWindowW(L"STATIC",hardwareCaption.c_str(),WS_CHILD|WS_VISIBLE,12,10,600,24,h,(HMENU)15,appInstance,NULL);
         SendMessageW(label,WM_SETFONT,(WPARAM)fontHandle,TRUE);
         SettingControl(h,L"STATIC",L"监控项目 · 点击切换显示",16,12,44,310,24);
         SettingControl(h,L"STATIC",L"显示设置",17,344,44,400,24);
@@ -499,6 +532,8 @@ static LRESULT CALLBACK PickerProc(HWND h,UINT m,WPARAM w,LPARAM l){
         SettingControl(h,L"BUTTON",L"硬件监控",80,0,0,1,1,BS_OWNERDRAW|WS_TABSTOP);
         SettingControl(h,L"BUTTON",L"分辨率切换",81,0,0,1,1,BS_OWNERDRAW|WS_TABSTOP);
         SettingControl(h,L"BUTTON",L"关于 / 许可",82,0,0,1,1,BS_OWNERDRAW|WS_TABSTOP);
+        c=SettingControl(h,L"BUTTON",L"银狼背景",83,0,0,1,1,BS_AUTOCHECKBOX|WS_TABSTOP);
+        SendMessageW(c,BM_SETCHECK,settingsArtworkEnabled?BST_CHECKED:BST_UNCHECKED,0);
         resolutionui::Create(h);resolutionui::Refresh();resolutionui::CurrentMode();
         LayoutPicker(h);SelectSettingsSection(settingsSection);return 0;
     }
@@ -513,8 +548,14 @@ static LRESULT CALLBACK PickerProc(HWND h,UINT m,WPARAM w,LPARAM l){
     }
     if(m==WM_SIZE){if(w!=SIZE_MINIMIZED)LayoutPicker(h);return 0;}
     if(m==WM_COMMAND){int id=LOWORD(w);
+        if(id==83){
+            settingsArtworkEnabled=SendMessageW(GetDlgItem(h,83),BM_GETCHECK,0,0)==BST_CHECKED;
+            SetLocal(L"SilverWolfBackground",settingsArtworkEnabled?1:0);
+            if(settingsArtworkEnabled)LoadSettingsArtwork();else ReleaseSettingsArtwork();
+            RedrawWindow(h,NULL,NULL,RDW_INVALIDATE|RDW_ERASE|RDW_ALLCHILDREN);return 0;
+        }
         if(id==80||id==81){SelectSettingsSection(id-80);return 0;}
-        if(id==82){std::wstring notice=L"AeroPanel\n硬件监控 + 分辨率切换\n功能参考：github.com/Drinkwater10086/aeropanel\n分辨率模块独立原生实现。\n\n内嵌 PresentMon 2.3.1 许可证：\n"+Wide(CaptureLicense,sizeof(CaptureLicense)-1);MessageBoxW(h,notice.c_str(),L"关于与第三方许可",MB_ICONINFORMATION);return 0;}
+        if(id==82){std::wstring notice=L"AeroPanel v3.0.1\n硬件监控 + 分辨率切换\n功能参考：github.com/Drinkwater10086/aeropanel\n分辨率模块独立原生实现。\n\n内嵌 PresentMon 2.3.1 许可证：\n"+Wide(CaptureLicense,sizeof(CaptureLicense)-1);MessageBoxW(h,notice.c_str(),L"关于与第三方许可",MB_ICONINFORMATION);return 0;}
         if(id>=100&&id<=121){resolutionui::Command(id);return 0;}
         if(id==11||id==12){SendMessageW(sensorList,LB_SETSEL,id==11,-1);return 0;}
         if(id==13){WritePrivateProfileStringW(L"Selection",L"FollowAfterburner",L"0",iniPath);
@@ -534,9 +575,12 @@ static LRESULT CALLBACK PickerProc(HWND h,UINT m,WPARAM w,LPARAM l){
             scrollRow=0;ApplyAppearance();RestorePosition();ReadSensors();RefreshPanel();DestroyWindow(h);return 0;}
         if(id==14){DestroyWindow(h);return 0;}
     }
-    if(m==WM_CTLCOLORSTATIC||m==WM_CTLCOLORLISTBOX||m==WM_CTLCOLORBTN){HDC dc=(HDC)w;
+    if(m==WM_CTLCOLORSTATIC||m==WM_CTLCOLORBTN){HDC dc=(HDC)w;
+        PaintSettingsBackground(h,dc,(HWND)l);SetTextColor(dc,RGB(225,230,240));SetBkMode(dc,TRANSPARENT);
+        return (LRESULT)GetStockObject(HOLLOW_BRUSH);}
+    if(m==WM_CTLCOLORLISTBOX||m==WM_CTLCOLOREDIT){HDC dc=(HDC)w;
         SetTextColor(dc,RGB(210,225,235));SetBkColor(dc,RGB(35,39,45));return (LRESULT)settingsBrush;}
-    if(m==WM_ERASEBKGND){RECT r;GetClientRect(h,&r);FillRect((HDC)w,&r,settingsBrush);return 1;}
+    if(m==WM_ERASEBKGND){PaintSettingsBackground(h,(HDC)w);return 1;}
     if(m==WM_DRAWITEM){DRAWITEMSTRUCT* item=(DRAWITEMSTRUCT*)l;if(item->CtlType==ODT_BUTTON){
         HBRUSH brush=CreateSolidBrush((item->itemState&ODS_SELECTED)||(item->CtlID==80+settingsSection)?RGB(42,78,100):RGB(49,56,65));
         FillRect(item->hDC,&item->rcItem,brush);DeleteObject(brush);
@@ -546,6 +590,7 @@ static LRESULT CALLBACK PickerProc(HWND h,UINT m,WPARAM w,LPARAM l){
         if(item->itemState&ODS_FOCUS){RECT r=item->rcItem;InflateRect(&r,-4,-4);DrawFocusRect(item->hDC,&r);}return TRUE;}}
     if(m==WM_DESTROY){settingsFullscreen=false;picker=NULL;return 0;}
     if(m==WM_NCDESTROY){
+        ReleaseSettingsTheme();
         if(settingsFont)DeleteObject(settingsFont);if(settingsPreviewFont)DeleteObject(settingsPreviewFont);
         settingsFont=settingsPreviewFont=NULL;settingsFontPixels=0;
     }
@@ -553,8 +598,14 @@ static LRESULT CALLBACK PickerProc(HWND h,UINT m,WPARAM w,LPARAM l){
 }
 static void OpenPicker(bool activate=true){
     if(picker){if(IsIconic(picker))ShowWindow(picker,SW_RESTORE);SetForegroundWindow(picker);return;}
-    picker=CreateWindowExW(WS_EX_TOPMOST,L"AeroPanelPicker",L"AeroPanel · 设置",WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,200,100,750,700,panel,NULL,appInstance,NULL);
+    picker=CreateWindowExW(WS_EX_TOPMOST|WS_EX_APPWINDOW,L"AeroPanelPicker",L"AeroPanel · 设置",WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,200,100,750,700,panel,NULL,appInstance,NULL);
     ShowWindow(picker,activate?SW_SHOW:SW_SHOWNOACTIVATE);
+    if(activate)SetForegroundWindow(picker);
+}
+static void SetApiAdmin(bool enabled){
+    StopApi();apiAdmin=enabled;if(captureEnabled)StartApi();
+    if(enabled&&!apiBroker.process){apiAdmin=false;if(captureEnabled)StartApi();}
+    WritePrivateProfileStringW(L"Capture",L"APIAdmin",apiAdmin?L"1":L"0",iniPath);
 }
 static void ShowMenu(){
     HMENU menu=CreatePopupMenu();
@@ -562,6 +613,7 @@ static void ShowMenu(){
     AppendMenuW(menu,MF_STRING,1,L"监控设置 / 传感器…");
     AppendMenuW(menu,MF_STRING,2,L"使用 Afterburner 当前 OSD 选择");
     AppendMenuW(menu,MF_STRING,3,fpsProcess?L"停止独立 FPS 采集":L"启用独立 FPS 采集");
+    AppendMenuW(menu,MF_STRING|(apiAdmin?MF_CHECKED:0),14,L"增强 API 识别（管理员）");
     AppendMenuW(menu,MF_SEPARATOR,0,NULL);
     AppendMenuW(menu,MF_STRING|(transparentBackground?MF_CHECKED:0),7,L"透明背景");
     AppendMenuW(menu,MF_STRING|(clickThrough?MF_CHECKED:0),8,L"鼠标穿透（透明模式）");
@@ -578,6 +630,7 @@ static void ShowMenu(){
     if(id==1)OpenPicker();
     if(id==2){followAfterburner=true;WritePrivateProfileStringW(L"Selection",L"FollowAfterburner",L"1",iniPath);scrollRow=0;ReadSensors();}
     if(id==3){captureEnabled=!captureEnabled;WritePrivateProfileStringW(L"Capture",L"Enabled",captureEnabled?L"1":L"0",iniPath);if(captureEnabled)StartFrames();else StopFrames();}
+    if(id==14)SetApiAdmin(!apiAdmin);
     if(id==4){LoadSettings();if(captureEnabled)StartFrames();else StopFrames();ApplyAppearance();SetTimer(panel,1,interval,NULL);RestorePosition();ReadSensors();}
     if(id==6){panelVisible=!panelVisible;if(panelVisible)RestorePosition();else ShowWindow(panel,SW_HIDE);}
     if(id==7){transparentBackground=!transparentBackground;SetLocal(L"Transparent",transparentBackground);ApplyAppearance();}
@@ -593,6 +646,7 @@ static void ShowMenu(){
     RefreshPanel();if(trayAdded&&!id)Shell_NotifyIconW(NIM_SETFOCUS,&trayData);
 }
 static LRESULT CALLBACK PanelProc(HWND h,UINT m,WPARAM w,LPARAM l){
+    if(m==WM_APP+17){SetApiAdmin(true);return 0;}
     if(m==taskbarCreated&&taskbarCreated){trayAdded=false;AddTray();return 0;}
     if(m==TRAY_MESSAGE){UINT event=LOWORD(l);
         if(event==WM_CONTEXTMENU||event==WM_RBUTTONUP)ShowMenu();
@@ -629,13 +683,14 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR command,int){
     HANDLE mutex=CreateMutexW(NULL,FALSE,L"Local\\AeroPanel.Standalone.v1");
     if(!mutex||GetLastError()==ERROR_ALREADY_EXISTS){
         HWND existing=FindWindowW(L"AeroPanelStandalone",NULL);
-        if(existing){if(wcsstr(command,L"--quit"))PostMessageW(existing,WM_CLOSE,0,0);else PostMessageW(existing,TRAY_MESSAGE,0,NIN_SELECT);}
+        if(existing){if(wcsstr(command,L"--quit"))PostMessageW(existing,WM_CLOSE,0,0);else if(wcsstr(command,L"--api-admin"))PostMessageW(existing,WM_APP+17,0,0);else PostMessageW(existing,TRAY_MESSAGE,0,NIN_SELECT);}
         if(mutex)CloseHandle(mutex);return 0;}
     if(wcsstr(command,L"--quit")){CloseHandle(mutex);return 0;}
     if(wcsstr(command,L"--smoke"))quitAt=GetTickCount64()+30000;
     const wchar_t* targetArg=wcsstr(command,L"--fps-pid=");
     if(targetArg){fpsTarget=wcstoul(targetArg+10,NULL,10);fixedFpsTarget=fpsTarget!=0;fpsTargetName=L"指定测试进程";}
     SetProcessDPIAware();LoadSettings();resolution::Init();
+    if(wcsstr(command,L"--api-admin")){apiAdmin=true;WritePrivateProfileStringW(L"Capture",L"APIAdmin",L"1",iniPath);}
     if(wcsstr(command,L"--enable-startup")){bool ok=resolution::SetStartup(true);CloseHandle(mutex);return ok?0:6;}
     fontHandle=CreateFontW(-16,0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Microsoft YaHei UI");
     settingsBrush=CreateSolidBrush(RGB(35,39,45));trayIcon=CreateTrayIcon();taskbarCreated=RegisterWindowMessageW(L"TaskbarCreated");
@@ -668,7 +723,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR command,int){
             Log(first&&trayAdded?L"TRAY CHECK PASS: icon added, removed and restored through TaskbarCreated handler.":L"TRAY CHECK FAIL.");
             if(!first||!trayAdded)checkExit=4;
         }
-        if(wcsstr(command,L"--ui-smoke")||!wcsstr(command,L"--background"))OpenPicker(false);
+        if(wcsstr(command,L"--ui-smoke")||!wcsstr(command,L"--background"))OpenPicker();
         if(captureEnabled||wcsstr(command,L"--fps-smoke"))StartFrames();
     }
     Log(L"Started: direct MAHMSharedMemory reader. No RTSS data or rendering dependency.");
