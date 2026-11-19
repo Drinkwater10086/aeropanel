@@ -609,8 +609,8 @@ static LRESULT CALLBACK PickerProc(HWND h,UINT m,WPARAM w,LPARAM l){
             RedrawWindow(h,NULL,NULL,RDW_INVALIDATE|RDW_ERASE|RDW_ALLCHILDREN);return 0;
         }
         if(id==80||id==81){SelectSettingsSection(id-80);return 0;}
-        if(id==82){std::wstring notice=L"AeroPanel v3.0.5\n硬件监控 + 分辨率切换\n功能参考：github.com/Drinkwater10086/aeropanel\n分辨率模块独立原生实现。\n\n内嵌 PresentMon 2.3.1 许可证：\n"+Wide(CaptureLicense,sizeof(CaptureLicense)-1);MessageBoxW(h,notice.c_str(),L"关于与第三方许可",MB_ICONINFORMATION);return 0;}
-        if(id>=100&&id<=121){resolutionui::Command(id);return 0;}
+        if(id==82){std::wstring notice=L"AeroPanel v3.0.6\n硬件监控 + 分辨率切换\n功能参考：github.com/Drinkwater10086/aeropanel\n分辨率模块独立原生实现。\n\n内嵌 PresentMon 2.3.1 许可证：\n"+Wide(CaptureLicense,sizeof(CaptureLicense)-1);MessageBoxW(h,notice.c_str(),L"关于与第三方许可",MB_ICONINFORMATION);return 0;}
+        if(id>=100&&id<=126){if((id!=122&&id!=125)||HIWORD(w)==CBN_SELCHANGE)resolutionui::Command(id);return 0;}
         if(id==11||id==12){SendMessageW(sensorList,LB_SETSEL,id==11,-1);return 0;}
         if(id==13){WritePrivateProfileStringW(L"Selection",L"FollowAfterburner",L"0",iniPath);
             for(size_t i=0;i<pickerSnapshot.size();++i)WritePrivateProfileStringW(L"Sensors",pickerSnapshot[i].key.c_str(),SendMessageW(sensorList,LB_GETSEL,i,0)>0?L"1":L"0",iniPath);
@@ -644,10 +644,11 @@ static LRESULT CALLBACK PickerProc(HWND h,UINT m,WPARAM w,LPARAM l){
     }
     if(m==WM_PRINTCLIENT){PaintSettingsBackground(h,(HDC)w);return 0;}
     if(m==WM_DRAWITEM){DRAWITEMSTRUCT* item=(DRAWITEMSTRUCT*)l;if(item->CtlType==ODT_BUTTON){
+        const bool disabled=(item->itemState&ODS_DISABLED)!=0;
         HBRUSH brush=CreateSolidBrush((item->itemState&ODS_SELECTED)||(item->CtlID==80+settingsSection)?RGB(42,78,100):RGB(49,56,65));
         FillRect(item->hDC,&item->rcItem,brush);DeleteObject(brush);
-        brush=CreateSolidBrush(RGB(0,150,210));FrameRect(item->hDC,&item->rcItem,brush);DeleteObject(brush);
-        wchar_t text[80];GetWindowTextW(item->hwndItem,text,80);SetBkMode(item->hDC,TRANSPARENT);SetTextColor(item->hDC,RGB(225,235,240));
+        brush=CreateSolidBrush(disabled?RGB(82,88,98):RGB(0,150,210));FrameRect(item->hDC,&item->rcItem,brush);DeleteObject(brush);
+        wchar_t text[80];GetWindowTextW(item->hwndItem,text,80);SetBkMode(item->hDC,TRANSPARENT);SetTextColor(item->hDC,disabled?RGB(144,151,162):RGB(225,235,240));
         HFONT old=(HFONT)SelectObject(item->hDC,settingsFont?settingsFont:fontHandle);DrawTextW(item->hDC,text,-1,&item->rcItem,DT_CENTER|DT_VCENTER|DT_SINGLELINE);SelectObject(item->hDC,old);
         if(item->itemState&ODS_FOCUS){RECT r=item->rcItem;InflateRect(&r,-4,-4);DrawFocusRect(item->hDC,&r);}return TRUE;}}
     if(m==WM_DESTROY){

@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include <tlhelp32.h>
 #include <commdlg.h>
 #include <shlobj.h>
@@ -17,6 +17,59 @@ static std::wstring status=L"自动切换已关闭";
 static ULONGLONG nextPoll=0,retryAt=0,previewUntil=0;
 static bool pendingRecovery=false,preview=false;
 static unsigned long pollCount=0;
+static std::vector<Config> foregroundRules;
+static constexpr size_t maxForegroundRules=24;
+static ULONGLONG nextDeltaScan=0;
+static Presence ruleDeltaGame=Presence::Unknown,ruleDeltaLauncher=Presence::Unknown;
+static void ReadForegroundRules(){
+    foregroundRules.clear();
+    for(size_t i=0;i<maxForegroundRules;++i){
+        auto key=std::to_wstring(i);
+        wchar_t text[1200]={};
+        GetPrivateProfileStringW(L"ForegroundResolution",key.c_str(),L"",text,1200,iniPath);
+        unsigned width=0,height=0,automatic=0;int end=0;
+        if(swscanf(text,L"%u,%u,%u,%n",&width,&height,&automatic,&end)!=3||
+           end<=0||!text[end]||width<320||width>16384||height<200||height>16384||automatic>1)continue;
+        Config rule;rule.platform=4;rule.enabled=true;rule.path=text+end;
+        if(rule.path.size()==8&&rule.path.rfind(L"@delta:",0)==0&&rule.path[7]>=L'0'&&rule.path[7]<=L'2'){
+            rule.platform=rule.path[7]-L'0';
+            rule.path.clear();
+        }
+        rule.width=(int)width;rule.height=(int)height;rule.automatic=automatic!=0;
+        foregroundRules.push_back(std::move(rule));
+    }
+}
+static bool SaveForegroundRules(const std::vector<Config>& rules){
+    std::wstring data;
+    for(size_t i=0;i<rules.size();++i){
+        const auto& rule=rules[i];
+        data+=std::to_wstring(i)+L"="+std::to_wstring(rule.width)+L","+
+            std::to_wstring(rule.height)+L","+std::to_wstring(rule.automatic)+L","+(rule.platform<3?L"@delta:"+std::to_wstring(rule.platform):rule.path);
+        data.push_back(L'\0');
+    }
+    data.push_back(L'\0');
+    if(rules.empty())data.push_back(L'\0');
+    if(!WritePrivateProfileSectionW(L"ForegroundResolution",data.c_str(),iniPath))return false;
+    foregroundRules=rules;
+    nextPoll=retryAt=nextDeltaScan=0;
+    return true;
+}
+static const Config* MatchForegroundRule(const std::wstring& path){
+    if(path.empty())return nullptr;
+    for(const auto& rule:foregroundRules)if(!_wcsicmp(rule.path.c_str(),path.c_str()))return &rule;
+    return nullptr;
+}
+static std::wstring ForegroundExecutable(){
+    DWORD pid=0;
+    GetWindowThreadProcessId(GetForegroundWindow(),&pid);
+    if(!pid||pid==GetCurrentProcessId())return L"";
+    HANDLE process=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,FALSE,pid);
+    if(!process)return L"";
+    wchar_t path[1024];DWORD size=1024;
+    bool ok=QueryFullProcessImageNameW(process,0,path,&size)!=FALSE;
+    CloseHandle(process);
+    return ok?std::wstring(path,size):L"";
+}
 static void Fields(DEVMODEW& m){m.dmSize=sizeof(m);m.dmDriverExtra=0;m.dmFields=DM_BITSPERPEL|DM_PELSWIDTH|DM_PELSHEIGHT|DM_DISPLAYFLAGS|DM_DISPLAYFREQUENCY;}
 static bool Exists(const std::wstring& p){return GetFileAttributesW(p.c_str())!=INVALID_FILE_ATTRIBUTES;}
 static void Note(const std::wstring& text){status=text;Log((L"Resolution: "+text).c_str());}
@@ -53,7 +106,7 @@ static bool SaveRecovery(const SavedMode& saved){
 static void ReadConfig(){
     config.enabled=GetPrivateProfileIntW(L"Resolution",L"Enabled",0,iniPath)!=0;
     config.automatic=GetPrivateProfileIntW(L"Resolution",L"Auto4x3",1,iniPath)!=0;
-    config.platform=Clamp(GetPrivateProfileIntW(L"Resolution",L"Platform",2,iniPath),0,3);
+    config.platform=Clamp(GetPrivateProfileIntW(L"Resolution",L"Platform",2,iniPath),0,4);
     config.width=GetPrivateProfileIntW(L"Resolution",L"Width",2880,iniPath);
     config.height=GetPrivateProfileIntW(L"Resolution",L"Height",2160,iniPath);
     wchar_t path[1024];GetPrivateProfileStringW(L"Resolution",L"Program",L"",path,1024,iniPath);config.path=path;
@@ -74,7 +127,7 @@ static bool SetStartup(bool enabled){
     if(file)file->Release();if(link)link->Release();if(SUCCEEDED(init))CoUninitialize();return SUCCEEDED(hr);
 }
 static bool SaveConfig(const Config& value){
-    if(value.platform<0||value.platform>3||value.width<320||value.width>16384||value.height<200||value.height>16384)return false;
+    if(value.platform<0||value.platform>4||value.width<320||value.width>16384||value.height<200||value.height>16384)return false;
     auto put=[&](const wchar_t* k,const std::wstring& v){return WritePrivateProfileStringW(L"Resolution",k,v.c_str(),iniPath)!=FALSE;};
     if(!put(L"Program",value.path)||!put(L"Platform",std::to_wstring(value.platform))||
         !put(L"Auto4x3",std::to_wstring(value.automatic))||!put(L"Width",std::to_wstring(value.width))||
@@ -82,12 +135,18 @@ static bool SaveConfig(const Config& value){
     if((value.startup||Exists(StartupPath()))&&!SetStartup(value.startup))return false;
     if(!put(L"Enabled",std::to_wstring(value.enabled)))return false;
     config=value;nextPoll=0;retryAt=0;
-    Note(policy.active?L"设置已保存，本次目标退出并恢复后使用新配置":config.enabled?L"自动切换已启用，等待目标程序":L"自动切换已关闭");return true;
+    Note(policy.active&&session.platform!=4?L"设置已保存，本次目标退出并恢复后使用新配置":config.enabled?L"自动切换已启用，等待目标程序":L"自动切换已关闭");return true;
+}
+static bool Calculate4x3(DWORD desktopHeight,int& width,int& height){
+    if(desktopHeight<200||desktopHeight>12288||desktopHeight%3)return false;
+    height=(int)desktopHeight;
+    width=height/3*4;
+    return width>=320;
 }
 static bool FindMode(const Config& cfg,SavedMode& before,DEVMODEW& target,LONG& code){
     code=DISP_CHANGE_BADMODE;if(!display.current(before)){code=DISP_CHANGE_FAILED;return false;}
     int width=cfg.width,height=cfg.height;
-    if(cfg.automatic){if(before.mode.dmPelsHeight%3){code=-100;return false;}height=before.mode.dmPelsHeight;width=height/3*4;}
+    if(cfg.automatic&&!Calculate4x3(before.mode.dmPelsHeight,width,height)){code=-100;return false;}
     if(width<320||width>16384||height<200||height>16384){code=-101;return false;}
     bool found=false;long diff=LONG_MAX;DEVMODEW mode={};
     for(DWORD i=0;;++i){mode={};mode.dmSize=sizeof(mode);if(!display.enumerate(before.device,i,&mode,0))break;
@@ -152,25 +211,73 @@ static bool Scan(const Config& cfg,Presence& game,Presence& launcher){
     DWORD end=GetLastError();CloseHandle(snapshot);if(!ok||end!=ERROR_NO_MORE_FILES)return false;
     if(cfg.platform==3){game=MatchPath(cfg,entries,ownSession);launcher=Presence::Absent;}return true;
 }
+static std::wstring (*foregroundExecutable)()=ForegroundExecutable;
+static bool (*scanProcesses)(const Config&,Presence&,Presence&)=Scan;
 static void Tick(){
     ULONGLONG now=GetTickCount64();
     if(preview){if(now>=previewUntil&&now>=retryAt){if(!Restore())retryAt=now+3000;}return;}
+    if(pendingRecovery)return;
+    if((policy.active&&session.platform==4)||(!policy.active&&config.platform==4)){
+        if((!config.enabled&&!policy.active)||now<nextPoll)return;
+        nextPoll=now+250;
+        const Config* match=nullptr;
+        bool prioritizeDelta=false;
+        if(config.enabled&&config.platform==4){
+            for(const auto& rule:foregroundRules){
+                if(rule.platform>=3)continue;
+                if(now>=nextDeltaScan){
+                    nextDeltaScan=now+1000;
+                    if(!scanProcesses(rule,ruleDeltaGame,ruleDeltaLauncher))
+                        ruleDeltaGame=ruleDeltaLauncher=Presence::Unknown;
+                }
+                Policy probe=policy;
+                probe.active=false;
+                prioritizeDelta=probe.Decide(true,rule.platform,ruleDeltaGame,ruleDeltaLauncher)==Action::Apply;
+                policy.launcherConsumed=probe.launcherConsumed;
+                if(prioritizeDelta)match=&rule;
+                break;
+            }
+            if(!match&&!foregroundRules.empty())match=MatchForegroundRule(foregroundExecutable());
+        }
+        if(policy.active){
+            if(match&&!prioritizeDelta&&!_wcsicmp(match->path.c_str(),session.path.c_str())&&
+               match->automatic==session.automatic&&match->width==session.width&&match->height==session.height)return;
+            if(now<retryAt)return;
+            if(!Restore()){retryAt=now+5000;return;}
+        }
+        if(match&&now>=retryAt){
+            if(Apply(*match,false)){if(prioritizeDelta)policy.Applied(ruleDeltaGame);else policy.active=true;}
+            else retryAt=now+3000;
+        }
+        return;
+    }
     if(pendingRecovery||(!config.enabled&&!policy.active)||now<nextPoll||now<retryAt)return;
     ++pollCount;nextPoll=now+(policy.active?1000:2000);
     const Config& cfg=policy.active?session:config;Presence game,launcher;
-    if(!Scan(cfg,game,launcher)){retryAt=now+5000;Note(L"进程枚举失败，保持当前显示模式");return;}
+    if(!scanProcesses(cfg,game,launcher)){retryAt=now+5000;Note(L"进程枚举失败，保持当前显示模式");return;}
+    if(config.platform==4&&cfg.platform<3){
+        ruleDeltaGame=game;ruleDeltaLauncher=launcher;nextDeltaScan=now+1000;
+    }
     Action action=policy.Decide(config.enabled,cfg.platform,game,launcher);
     if(game==Presence::Unknown&&action==Action::None){status=L"无法确认同名进程路径，保持当前显示模式";return;}
     if(action==Action::Apply){if(Apply(cfg,false))policy.Applied(game);else retryAt=now+30000;}
     if(action==Action::Restore){if(Restore())policy.Restored(launcher);else retryAt=now+5000;}
 }
 static void Init(){
-    recoveryFile=std::wstring(folder)+L"\\display-recovery.bin";ReadConfig();pendingRecovery=Exists(recoveryFile);
+    recoveryFile=std::wstring(folder)+L"\\display-recovery.bin";ReadConfig();ReadForegroundRules();pendingRecovery=Exists(recoveryFile);
     if(pendingRecovery){Note(L"发现未恢复记录，请打开分辨率板块恢复");return;}
     HANDLE legacy=OpenMutexW(SYNCHRONIZE,FALSE,L"Local\\DeltaResolutionWatcher");
     if(legacy){CloseHandle(legacy);config.enabled=false;Note(L"旧版分辨率工具正在运行，请先退出旧版");return;}
     if(config.enabled&&config.platform<2){Presence game,launcher;
         if(Scan(config,game,launcher)&&game==Presence::Absent&&launcher==Presence::Present)policy.launcherConsumed=true;
+    }
+    if(config.enabled&&config.platform==4){
+        for(const auto& rule:foregroundRules)if(rule.platform<2){
+            Presence game,launcher;
+            if(Scan(rule,game,launcher)&&game==Presence::Absent&&launcher==Presence::Present)
+                policy.launcherConsumed=true;
+            break;
+        }
     }
     status=config.enabled?L"自动切换已启用，等待目标程序":L"自动切换已关闭";
 }

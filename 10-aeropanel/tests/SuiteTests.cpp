@@ -108,6 +108,50 @@ static void ProcessTests(){
     nextPoll=0;Tick();Check(!policy.active&&fakeMode.mode.dmPelsWidth==3840,"last_real_instance_exit_drives_restore");
     EndProbe(first);config=old;display={};
 }
+static std::wstring fakeForegroundPath;
+static std::wstring FakeForeground(){return fakeForegroundPath;}
+static resolution::Presence fakeDeltaGame=resolution::Presence::Absent;
+static bool FakeDeltaScan(const resolution::Config&,resolution::Presence& game,resolution::Presence& launcher){
+    game=fakeDeltaGame;launcher=resolution::Presence::Absent;return true;
+}
+static void ForegroundRuleTests(){
+    using namespace resolution;
+    auto savedConfig=config;
+    auto savedRules=foregroundRules;
+    ResetFake();
+    foregroundExecutable=FakeForeground;
+    Config a;a.platform=4;a.enabled=true;a.path=L"C:\\甲\\app.exe";
+    Config b=a;b.path=L"C:\\乙\\app.exe";b.automatic=false;b.width=1920;b.height=1080;
+    Check(SaveForegroundRules({a,b}),"foreground_rules_save");
+    ReadForegroundRules();
+    Check(foregroundRules.size()==2&&MatchForegroundRule(b.path)&&
+        MatchForegroundRule(b.path)->height==1080,"foreground_rules_reload");
+    config=a;
+    fakeForegroundPath=a.path;Tick();
+    Check(policy.active&&fakeMode.mode.dmPelsWidth==2880,"foreground_first_rule_applies");
+    fakeForegroundPath=b.path;nextPoll=0;Tick();
+    Check(policy.active&&fakeMode.mode.dmPelsWidth==1920,"foreground_second_rule_applies");
+    fakeForegroundPath=L"C:\\other\\app.exe";nextPoll=0;Tick();
+    Check(!policy.active&&fakeMode.mode.dmPelsWidth==3840&&!Exists(recoveryFile),"foreground_unmatched_full_path_restores_original");
+    Config delta=a;delta.platform=2;delta.path.clear();
+    Check(SaveForegroundRules({a,b,delta}),"delta_rule_save");
+    ReadForegroundRules();
+    Check(foregroundRules.size()==3&&foregroundRules.back().platform==2&&foregroundRules.back().path.empty(),
+        "delta_rule_channel_persists_separately_from_exe");
+    scanProcesses=FakeDeltaScan;
+    fakeDeltaGame=Presence::Present;
+    fakeForegroundPath=b.path;nextPoll=nextDeltaScan=0;Tick();
+    Check(policy.active&&session.platform==2&&fakeMode.mode.dmPelsWidth==2880,"delta_rule_takes_priority");
+    fakeForegroundPath.clear();nextPoll=0;Tick();
+    Check(policy.active&&fakeMode.mode.dmPelsWidth==2880,"delta_rule_stays_active_when_unfocused");
+    fakeDeltaGame=Presence::Absent;nextPoll=0;Tick();
+    Check(!policy.active&&fakeMode.mode.dmPelsWidth==3840,"delta_rule_restores_on_game_exit");
+    scanProcesses=Scan;
+    foregroundExecutable=ForegroundExecutable;
+    config=savedConfig;
+    SaveForegroundRules(savedRules);
+    display={};
+}
 static void FrameTests(){
     fpsProcess=GetCurrentProcess();frameTimes.clear();streams.clear();activeStream={42,"chain"};fpsTarget=42;lastFrameTick=GetTickCount64();
     std::vector<double> original;for(int i=0;i<4096;++i){double ms=1.0+(i*73%509)/11.0;frameTimes.push_back(ms);original.push_back(ms);}
@@ -253,6 +297,6 @@ int wmain(int argc,wchar_t** argv){
         fclose(live);WaitForSingleObject(guard.hProcess,15000);CloseHandle(guard.hThread);CloseHandle(guard.hProcess);return applied&&changedOk&&restoredOk?0:1;
     }
     std::wstring report=std::wstring(folder)+L"\\test-results.txt";results=_wfopen(report.c_str(),L"wb");if(!results)return 2;
-    PolicyTests();DisplayTests();ProcessTests();FrameTests();UiTests();
+    PolicyTests();DisplayTests();ProcessTests();ForegroundRuleTests();FrameTests();UiTests();
     fprintf(results,"SUMMARY passed=%u failed=%u\n",passed,failed);fclose(results);printf("passed=%u failed=%u\n",passed,failed);return failed?1:0;
 }

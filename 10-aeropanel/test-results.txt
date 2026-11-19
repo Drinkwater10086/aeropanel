@@ -31,7 +31,7 @@ PASS normal_exit_restores_active_session
 PASS corrupt_recovery_is_not_applied
 PASS real_primary_display_readable
 PASS real_driver_accepts_current_mode_without_switch
-INFO real_auto_4x3_supported=1 driver_code=0 current=1920x1080@480
+INFO real_auto_4x3_supported=1 driver_code=0 current=3840x2160@240
 PASS unicode_configuration_write
 PASS unicode_configuration_roundtrip
 PASS startup_shortcut_created_in_test_directory
@@ -45,6 +45,16 @@ PASS one_remaining_instance_keeps_target_alive
 PASS one_remaining_real_instance_does_not_restore
 PASS last_target_instance_exit_detected
 PASS last_real_instance_exit_drives_restore
+PASS foreground_rules_save
+PASS foreground_rules_reload
+PASS foreground_first_rule_applies
+PASS foreground_second_rule_applies
+PASS foreground_unmatched_full_path_restores_original
+PASS delta_rule_save
+PASS delta_rule_channel_persists_separately_from_exe
+PASS delta_rule_takes_priority
+PASS delta_rule_stays_active_when_unfocused
+PASS delta_rule_restores_on_game_exit
 PASS optimized_1_percent_matches_full_sort
 PASS optimized_point1_percent_matches_full_sort
 PASS kernel_fallback_present_fps_and_frametime
@@ -74,7 +84,7 @@ PASS single_exe_extracts_verified_capture_runtime
 PASS existing_capture_runtime_verified_and_reused
 PASS replay_real_delta_force_capture_rows
 PASS real_delta_force_capture_fps_regression
-BENCH percentile_2000_iterations full_sort_ms=89.721 partial_selection_ms=16.953 speed_ratio=5.292
+BENCH percentile_2000_iterations full_sort_ms=93.121 partial_selection_ms=17.455 speed_ratio=5.335
 PASS silver_wolf_tray_icon_resource_loads
 PASS two_sections_created_in_same_window
 PASS preblurred_background_loaded_at_fixed_size
@@ -90,4 +100,4 @@ PASS fullscreen_exit_restores_window
 PASS closing_settings_releases_fonts
 PASS closing_settings_releases_artwork_and_icons
 PASS repeated_settings_open_close_does_not_accumulate_gdi_objects
-SUMMARY passed=89 failed=0
+SUMMARY passed=99 failed=0
