@@ -22,6 +22,9 @@
 static HWND panel, picker, sensorList;
 static int settingsSection=0;
 static bool settingsFullscreen=false;
+static bool settingsDragging=false, settingsLayoutQueued=false;
+static constexpr UINT_PTR settingsLayoutTimer=2;
+static constexpr UINT settingsLayoutDelayMs=32;
 static WINDOWPLACEMENT settingsPlacement={sizeof(WINDOWPLACEMENT)};
 static LONG_PTR settingsWindowStyle=0;
 static HFONT fontHandle;
@@ -97,26 +100,30 @@ static void PublishSensors(std::vector<Sensor>& next){
         sensor.name=names[id-0x50];sensor.units=id==0x51?L"ms":L"FPS";
         sensor.key=L"IndependentFrame_"+std::to_wstring(id);
         sensor.selected=followAfterburner?(id==0x50||id==0x51||id==0x55):GetPrivateProfileIntW(L"Sensors",sensor.key.c_str(),0,iniPath)!=0;
-        sensor.value=sensor.selected?(float)FrameValue(id):NAN;sensor.valid=isfinite(sensor.value);next.push_back(sensor);
+        sensor.value=sensor.selected?(float)FrameValue(id):NAN;sensor.valid=isfinite(sensor.value);next.push_back(std::move(sensor));
     }
     sensors.swap(next);
+    next.clear();
     for(const Sensor& sensor:sensors)if(sensor.selected){auto& values=history[sensor.key];values.push_back(sensor.valid?sensor.value:NAN);if(values.size()>60)values.pop_front();}
     ++updateCount;
 }
 static bool ReadSensors() {
+    // Keep the previous vector's capacity after PublishSensors swaps it out.
+    static std::vector<Sensor> next;
     HANDLE map=OpenFileMappingW(FILE_MAP_READ,FALSE,L"MAHMSharedMemory");
-    if(!map){statusText=L"请运行 MSI Afterburner；本程序无需 RTSS。";std::vector<Sensor> next;PublishSensors(next);return false;}
+    if(!map){statusText=L"请运行 MSI Afterburner；本程序无需 RTSS。";PublishSensors(next);return false;}
     const BYTE* view=(const BYTE*)MapViewOfFile(map,FILE_MAP_READ,0,0,0);
-    if(!view){CloseHandle(map);statusText=L"无法读取 Afterburner 数据，请检查运行权限。";std::vector<Sensor> next;PublishSensors(next);return false;}
+    if(!view){CloseHandle(map);statusText=L"无法读取 Afterburner 数据，请检查运行权限。";PublishSensors(next);return false;}
     MEMORY_BASIC_INFORMATION region={};VirtualQuery(view,&region,sizeof(region));
     bool valid=region.RegionSize>=32 && Read32(view)==0x4D41484D && Read32(view+4)==0x20000;
     DWORD header=valid?Read32(view+8):0,count=valid?Read32(view+12):0,stride=valid?Read32(view+16):0;
     valid=valid && header>=32 && stride>=1324 && count<=4096 &&
         (ULONGLONG)header+(ULONGLONG)stride*count<=region.RegionSize;
-    std::vector<Sensor> next;
     DWORD stamp=valid?Read32(view+20):0;
     if(valid) {
-        next.reserve(count);
+        next.reserve(count+7);
+        const bool readAfterburnerProfile=followAfterburner&&afterburnerConfig[0]&&
+            !GetPrivateProfileIntW(L"Settings",L"EnableServer",1,afterburnerConfig);
         DWORD gpuCount=Read32(view+24),gpuStride=Read32(view+28);
         ULONGLONG gpuOffset=(ULONGLONG)header+(ULONGLONG)stride*count;
         std::map<DWORD,std::wstring> devices;
@@ -145,14 +152,13 @@ static bool ReadSensors() {
             bool publishedSelection=(s.flags&1)!=0;
             // Disabling Afterburner's RTSS link also clears its shared OSD flags.
             // Read the existing monitoring selection without enabling the server.
-            if(followAfterburner&&afterburnerConfig[0]&&
-                !GetPrivateProfileIntW(L"Settings",L"EnableServer",1,afterburnerConfig)){
+            if(readAfterburnerProfile){
                 std::wstring section=L"Source "+Wide((const char*)entry,260);
                 publishedSelection=GetPrivateProfileIntW(section.c_str(),L"ShowInOSD",publishedSelection,afterburnerProfile)!=0;
             }
             s.selected=followAfterburner ? publishedSelection :
                 GetPrivateProfileIntW(L"Sensors",s.key.c_str(),0,iniPath)!=0;
-            next.push_back(s);
+            next.push_back(std::move(s));
         }
         hardwareCaption=L"AEROPANEL / ";
         for(const auto& device:activeDevices){auto name=devices.find(device.first);
@@ -448,8 +454,8 @@ static void LayoutPicker(HWND h){
     HDWP batch=BeginDeferWindowPos(30);
     auto place=[&](int id,int x,int y,int w,int ht){HWND control=GetDlgItem(h,id);if(!control)return;
         y+=tabHeight;
-        if(batch)batch=DeferWindowPos(batch,control,NULL,x,y,w,ht,SWP_NOZORDER|SWP_NOACTIVATE);
-        else MoveWindow(control,x,y,w,ht,TRUE);
+        if(batch)batch=DeferWindowPos(batch,control,NULL,x,y,w,ht,SWP_NOZORDER|SWP_NOACTIVATE|SWP_NOCOPYBITS|SWP_NOREDRAW);
+        else SetWindowPos(control,NULL,x,y,w,ht,SWP_NOZORDER|SWP_NOACTIVATE|SWP_NOCOPYBITS|SWP_NOREDRAW);
     };
     place(15,px(12),px(10),width-px(24),px(24));place(16,px(12),px(44),left,px(24));place(17,right,px(44),rightWidth,px(24));
     place(10,px(12),px(72),left,std::max(px(80),buttons-px(84)));
@@ -466,12 +472,12 @@ static void LayoutPicker(HWND h){
     place(44,right,px(346),px(180),px(24));place(39,right+px(196),px(342),rightWidth-px(196),px(26));
     place(46,right,px(388),rightWidth,px(60));place(45,right,px(462),rightWidth,px(50));place(47,right,px(514),rightWidth,px(24));
     if(batch)EndDeferWindowPos(batch);
-    MoveWindow(GetDlgItem(h,80),px(12),px(5),px(150),px(30),FALSE);
-    MoveWindow(GetDlgItem(h,81),px(174),px(5),px(170),px(30),FALSE);
-    MoveWindow(GetDlgItem(h,82),width-px(124),px(5),px(112),px(30),FALSE);
-    MoveWindow(GetDlgItem(h,83),px(356),px(5),px(160),px(30),FALSE);
+    SetWindowPos(GetDlgItem(h,80),NULL,px(12),px(5),px(150),px(30),SWP_NOZORDER|SWP_NOACTIVATE|SWP_NOCOPYBITS|SWP_NOREDRAW);
+    SetWindowPos(GetDlgItem(h,81),NULL,px(174),px(5),px(170),px(30),SWP_NOZORDER|SWP_NOACTIVATE|SWP_NOCOPYBITS|SWP_NOREDRAW);
+    SetWindowPos(GetDlgItem(h,82),NULL,width-px(124),px(5),px(112),px(30),SWP_NOZORDER|SWP_NOACTIVATE|SWP_NOCOPYBITS|SWP_NOREDRAW);
+    SetWindowPos(GetDlgItem(h,83),NULL,px(356),px(5),px(160),px(30),SWP_NOZORDER|SWP_NOACTIVATE|SWP_NOCOPYBITS|SWP_NOREDRAW);
     resolutionui::Layout(h,scale,width,height);
-    RedrawWindow(h,NULL,NULL,RDW_INVALIDATE|RDW_ALLCHILDREN);
+    RedrawWindow(h,NULL,NULL,RDW_INVALIDATE|RDW_ERASE|RDW_ALLCHILDREN);
 }
 static void ToggleSettingsFullscreen(){
     if(!picker)return;
@@ -544,7 +550,27 @@ static LRESULT CALLBACK PickerProc(HWND h,UINT m,WPARAM w,LPARAM l){
         resolutionui::Create(h);resolutionui::Refresh();resolutionui::CurrentMode();
         LayoutPicker(h);SelectSettingsSection(settingsSection);return 0;
     }
-    if(m==WM_TIMER){if(settingsSection==0)SetWindowTextW(GetDlgItem(h,46),fpsStatus.c_str());else resolutionui::Status();return 0;}
+    if(m==WM_TIMER){
+        if(w==settingsLayoutTimer){
+            KillTimer(h,settingsLayoutTimer);
+            settingsLayoutQueued=false;
+            LayoutPicker(h);
+        }else if(w==1&&!settingsDragging){
+            if(settingsSection==0)SetWindowTextW(GetDlgItem(h,46),fpsStatus.c_str());
+            else resolutionui::Status();
+        }
+        return 0;
+    }
+    if(m==WM_ENTERSIZEMOVE){settingsDragging=true;return 0;}
+    if(m==WM_EXITSIZEMOVE){
+        settingsDragging=false;
+        if(settingsLayoutQueued){
+            KillTimer(h,settingsLayoutTimer);
+            settingsLayoutQueued=false;
+            LayoutPicker(h);
+        }
+        return 0;
+    }
     if(m==WM_GETMINMAXINFO&&!settingsFullscreen){
         RECT minimum={0,0,720,640};
         AdjustWindowRectEx(&minimum,(DWORD)GetWindowLongPtrW(h,GWL_STYLE),FALSE,(DWORD)GetWindowLongPtrW(h,GWL_EXSTYLE));
@@ -553,7 +579,15 @@ static LRESULT CALLBACK PickerProc(HWND h,UINT m,WPARAM w,LPARAM l){
         limits->ptMinTrackSize.y=minimum.bottom-minimum.top;
         return 0;
     }
-    if(m==WM_SIZE){if(w!=SIZE_MINIMIZED)LayoutPicker(h);return 0;}
+    if(m==WM_SIZE){
+        if(w==SIZE_MINIMIZED)return 0;
+        if(!settingsDragging)LayoutPicker(h);
+        else if(!settingsLayoutQueued){
+            settingsLayoutQueued=SetTimer(h,settingsLayoutTimer,settingsLayoutDelayMs,NULL)!=0;
+            if(!settingsLayoutQueued)LayoutPicker(h);
+        }
+        return 0;
+    }
     if(m==WM_COMMAND){int id=LOWORD(w);
         if(id==83){
             settingsArtworkEnabled=SendMessageW(GetDlgItem(h,83),BM_GETCHECK,0,0)==BST_CHECKED;
@@ -562,7 +596,7 @@ static LRESULT CALLBACK PickerProc(HWND h,UINT m,WPARAM w,LPARAM l){
             RedrawWindow(h,NULL,NULL,RDW_INVALIDATE|RDW_ERASE|RDW_ALLCHILDREN);return 0;
         }
         if(id==80||id==81){SelectSettingsSection(id-80);return 0;}
-        if(id==82){std::wstring notice=L"AeroPanel v3.0.2\n硬件监控 + 分辨率切换\n功能参考：github.com/Drinkwater10086/aeropanel\n分辨率模块独立原生实现。\n\n内嵌 PresentMon 2.3.1 许可证：\n"+Wide(CaptureLicense,sizeof(CaptureLicense)-1);MessageBoxW(h,notice.c_str(),L"关于与第三方许可",MB_ICONINFORMATION);return 0;}
+        if(id==82){std::wstring notice=L"AeroPanel v3.0.3\n硬件监控 + 分辨率切换\n功能参考：github.com/Drinkwater10086/aeropanel\n分辨率模块独立原生实现。\n\n内嵌 PresentMon 2.3.1 许可证：\n"+Wide(CaptureLicense,sizeof(CaptureLicense)-1);MessageBoxW(h,notice.c_str(),L"关于与第三方许可",MB_ICONINFORMATION);return 0;}
         if(id>=100&&id<=121){resolutionui::Command(id);return 0;}
         if(id==11||id==12){SendMessageW(sensorList,LB_SETSEL,id==11,-1);return 0;}
         if(id==13){WritePrivateProfileStringW(L"Selection",L"FollowAfterburner",L"0",iniPath);
@@ -587,7 +621,15 @@ static LRESULT CALLBACK PickerProc(HWND h,UINT m,WPARAM w,LPARAM l){
         return (LRESULT)GetStockObject(HOLLOW_BRUSH);}
     if(m==WM_CTLCOLORLISTBOX||m==WM_CTLCOLOREDIT){HDC dc=(HDC)w;
         SetTextColor(dc,RGB(210,225,235));SetBkColor(dc,RGB(35,39,45));return (LRESULT)settingsBrush;}
-    if(m==WM_ERASEBKGND){PaintSettingsBackground(h,(HDC)w);return 1;}
+    if(m==WM_ERASEBKGND)return 1;
+    if(m==WM_PAINT){
+        PAINTSTRUCT paint;
+        HDC dc=BeginPaint(h,&paint);
+        PaintSettingsBackground(h,dc);
+        EndPaint(h,&paint);
+        return 0;
+    }
+    if(m==WM_PRINTCLIENT){PaintSettingsBackground(h,(HDC)w);return 0;}
     if(m==WM_DRAWITEM){DRAWITEMSTRUCT* item=(DRAWITEMSTRUCT*)l;if(item->CtlType==ODT_BUTTON){
         HBRUSH brush=CreateSolidBrush((item->itemState&ODS_SELECTED)||(item->CtlID==80+settingsSection)?RGB(42,78,100):RGB(49,56,65));
         FillRect(item->hDC,&item->rcItem,brush);DeleteObject(brush);
@@ -595,7 +637,13 @@ static LRESULT CALLBACK PickerProc(HWND h,UINT m,WPARAM w,LPARAM l){
         wchar_t text[80];GetWindowTextW(item->hwndItem,text,80);SetBkMode(item->hDC,TRANSPARENT);SetTextColor(item->hDC,RGB(225,235,240));
         HFONT old=(HFONT)SelectObject(item->hDC,settingsFont?settingsFont:fontHandle);DrawTextW(item->hDC,text,-1,&item->rcItem,DT_CENTER|DT_VCENTER|DT_SINGLELINE);SelectObject(item->hDC,old);
         if(item->itemState&ODS_FOCUS){RECT r=item->rcItem;InflateRect(&r,-4,-4);DrawFocusRect(item->hDC,&r);}return TRUE;}}
-    if(m==WM_DESTROY){settingsFullscreen=false;picker=NULL;return 0;}
+    if(m==WM_DESTROY){
+        KillTimer(h,settingsLayoutTimer);
+        settingsDragging=settingsLayoutQueued=false;
+        settingsFullscreen=false;
+        picker=NULL;
+        return 0;
+    }
     if(m==WM_NCDESTROY){
         ReleaseSettingsTheme();
         if(settingsFont)DeleteObject(settingsFont);if(settingsPreviewFont)DeleteObject(settingsPreviewFont);

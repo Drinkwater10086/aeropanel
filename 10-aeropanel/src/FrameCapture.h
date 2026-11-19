@@ -87,8 +87,6 @@ static double FrameValue(DWORD id){
     // Desktop values describe this OSD's fixed 1 Hz refresh, not game rendering latency.
     if(DesktopIdle())return id==0x51?1000.0:IsFrameSource(id)?1.0:HUGE_VAL;
     if(!fpsProcess||frameTimes.empty()||GetTickCount64()-lastFrameTick>2500)return HUGE_VAL;
-    double sum=0;for(double v:frameTimes)sum+=v;
-    if(sum<=0)return HUGE_VAL;
     if(id==0x50||id==0x51){ULONGLONG now=GetTickCount64();double recent=0;unsigned count=0;auto found=streams.find(activeStream);
         if(found!=streams.end())for(const auto& f:found->second.recent)if(now-f.tick<=1200){recent+=f.ms;++count;}
         if(!count){recent=frameTimes.back();count=1;}
@@ -100,7 +98,7 @@ static double FrameValue(DWORD id){
     static std::vector<double> sorted;sorted.assign(frameTimes.begin(),frameTimes.end());
     size_t n=(size_t)ceil(sorted.size()*(id==0x55?0.01:0.001));if(!n)n=1;
     if(n<sorted.size())std::nth_element(sorted.begin(),sorted.begin()+n,sorted.end(),std::greater<double>());
-    sum=0;for(size_t i=0;i<n;++i)sum+=sorted[i];return 1000.0*n/sum;
+    double sum=0;for(size_t i=0;i<n;++i)sum+=sorted[i];return 1000.0*n/sum;
 }
 static void SelectFrameStream(){
     ULONGLONG now=GetTickCount64();FrameKey best={0,""};int bestPriority=-1;size_t bestCount=0;
