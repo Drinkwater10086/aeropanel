@@ -1,21 +1,53 @@
-# 程序分辨率自动切换
+# AeroPanel
 
-Windows 分辨率自动切换工具。当前版本为原生单文件程序，支持指定任意 EXE，并保留三角洲渠道预设。按开发顺序保留九个版本。前四个版本来自当时保存的归档，部分被覆盖的中间版本无法还原。
+面向 Windows 的轻量硬件监控与程序分辨率切换工具。两个板块共用原生设置窗口、托盘和主进程。
 
-1. `01-manual`：手动启动，固定切换 2880×2160 并恢复 3840×2160。
-2. `02-auto-fixed`：后台检测，使用固定分辨率。
-3. `03-auto-4x3`：按主显示器高度计算 4:3，保存并恢复原模式。
-4. `04-multi-platform`：增加多平台进程检测。
-5. `05-tray-settings`：新增设置界面、托盘菜单、自定义分辨率和错误日志；[改动与性能试测](05-tray-settings/CHANGELOG.md)。
-6. `06-performance`：优化空闲轮询和显示代码加载；[性能对比](06-performance/PERFORMANCE.md)。
-7. `07-native`：原生托盘监测后台；[使用与性能试测](07-native/README.md)。
-8. `08-single-exe`：设置、托盘和切换均为原生单文件；[使用说明](08-single-exe/README.md)。
-9. `09-general-program`：按完整路径监听其他程序，保留三角洲预设；[使用说明](09-general-program/README.md) · [v2.0.0 改动](09-general-program/RELEASE-NOTES.md)。
+**原仓库 `delta_restiming` 已更名为 `aeropanel`，历史提交和 01–09 版本目录保留。**
 
-## 使用最新版本
+## 下载
 
-从 [Release](https://github.com/Drinkwater10086/delta_restiming/releases/latest) 下载 `ResolutionSwitcher.exe`。先关闭旧版登录自启并退出旧版后台，再打开新版。选择“指定其他程序”，浏览选定实际运行的 EXE，或选择三角洲 Steam、官方启动器、WeGame 预设。选择分辨率，检查后保存。
+前往 [Releases](https://github.com/Drinkwater10086/aeropanel/releases/latest)，下载 `AeroPanel-v3.0.0-win32.zip`，解压到可写目录并运行 `AeroPanel.exe`。也可单独下载 EXE；第三方许可已内嵌，可从“关于 / 许可”查看。
 
-通用模式按完整路径匹配当前 Windows 会话的程序，启动时切换、匹配实例全部退出后恢复。一次启用一个目标；当前会话中修改目标将在恢复后生效。设置界面关闭后仍可通过托盘打开。
+## 两个板块
 
-详细升级步骤、数据位置和限制请见[通用版说明](09-general-program/README.md)。已完成使用模拟显示接口的流程测试；真实分辨率切换尚未完成端到端实机验证。除 Steam 外，其他三角洲渠道均未实机测试，本版本 Steam 完整流程也尚未实机验证。
+| 板块 | 功能 |
+|---|---|
+| 硬件监控 | 传感器选择、透明背景、鼠标穿透、置顶、字号、数值和图表；独立 FPS、帧时间、最低/平均/最高 FPS、1% / 0.1% low |
+| 分辨率切换 | 按指定程序完整路径自动切换与恢复；自动同高度 4:3 或自定义宽高；驱动检查、15 秒试用、异常恢复记录；保留三角洲三个渠道预设 |
+
+默认文字位于屏幕左上角、字号 26；分辨率自动切换默认关闭。设置窗口支持拖动边框缩放、最大化、F11 全屏和 Esc 退出全屏，字体随窗口缩放。关闭设置窗口后继续在托盘运行。
+
+## 依赖与边界
+
+- 硬件传感器来自 **MSI Afterburner** 的共享数据，需要其运行并启用硬件监控。可跟随其 OSD 选择，或在 AeroPanel 内独立选择；只显示 Afterburner 实际提供的项目。
+- **不需要运行 RTSS。** AeroPanel 不会自动修改 Afterburner 或 RTSS 设置。如 Afterburner 仍自动启动 RTSS，需要自行检查其联动配置。
+- EXE 内嵌 **PresentMon 2.3.1**，首次运行验证并展开到 `runtime/PresentMon.exe`，由主程序管理帧采集子进程。因此单 EXE 交付不表示所有采集都在同一进程中。
+- 帧率读取依赖 ETW 权限和目标程序是否产生可捕获的呈现事件；受 ETW 丢事件影响，不保证与游戏内计数或其他基准完全一致。无有效新数据时显示 N/A。
+- 置顶基于 Windows 窗口机制，不能保证覆盖独占全屏游戏、系统安全桌面或其他特殊合成界面。
+- 分辨率仅操作主显示器，能否切换取决于驱动支持，不修改永久显示配置。
+
+## 构建与测试
+
+当前源码在 [`10-aeropanel`](10-aeropanel)。需要 Windows 和便携 **Zig 0.15.2**（已验证版本），不需要安装服务或驱动。
+
+```powershell
+cd 10-aeropanel
+.\build.ps1 -ZigPath 'C:\Tools\zig\zig.exe'
+.\build.ps1 -ZigPath 'C:\Tools\zig\zig.exe' -Tests
+```
+
+结果位于 `.build/`。未传 `-ZigPath` 时从 PATH 查找 `zig`。测试仅操作自身临时文件、模拟显示后端和自建测试进程；默认测试会查询显示模式及调用驱动检查，不实际切换屏幕，也不更改真实登录自启。
+
+发布回归：**62 项通过，0 项失败**。历史实屏切换及资源采样、测试范围和限制见 [测试报告](10-aeropanel/TESTING.md)。性能数据是特定机器的短时样本，不代表所有游戏和设备。
+
+## 配置与恢复
+
+配置、日志、采集器及未完成的显示恢复记录保存在程序目录。请解压到可写位置；每个目录使用独立配置。登录自启开关控制整个 AeroPanel。
+
+切换前持久保存原显示模式，正常退出自动恢复；异常退出后重启会暂停自动切换，可在分辨率板块恢复。存在 `display-recovery.bin` 时先恢复，不要直接删除记录。退出程序应使用托盘菜单。
+
+## 来源与第三方许可
+
+分辨率板块依据本仓库 09 版本需求独立实现，保留历史版本供参考。PresentMon 的 MIT 许可证见 [PresentMon-LICENSE.txt](10-aeropanel/PresentMon-LICENSE.txt)，同时内嵌于 EXE。内嵌字节数组位于 `src/CapturePayload.h`，运行时逐字节校验后复用；构建不下载或执行远程脚本。
+
+历史目录和当前项目未添加新的项目许可证；PresentMon 许可仅适用于该第三方组件。

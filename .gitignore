@@ -1,0 +1,10 @@
+# Generated files and personal settings
+10-aeropanel/.build/
+10-aeropanel/runtime/
+10-aeropanel/*.ini
+10-aeropanel/*.log
+10-aeropanel/*.lnk
+10-aeropanel/*recovery.bin
+10-aeropanel/*.bmp
+10-aeropanel/tests/*.exe
+10-aeropanel/tests/runtime/
