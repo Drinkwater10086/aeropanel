@@ -224,11 +224,24 @@ static std::wstring ValueText(const Sensor& s) {
     swprintf(value,90,L"%.*f",precision,s.value);
     return std::wstring(value)+(s.units.empty()?L"":L" "+s.units);
 }
+static bool ShouldSuggestFrameIssue(){
+    if(!captureEnabled||isfinite(FrameValue(0x50)))return false;
+    return !fpsProcess||(captureStarted&&GetTickCount64()-captureStarted>=8000);
+}
+static std::wstring FrameSettingsStatus(){
+    return fpsStatus+(ShouldSuggestFrameIssue()?L"\n若持续无帧率，请从托盘菜单提交 GitHub Issue。":L"");
+}
 static void DrawCurve(HDC dc,const Sensor& sensor,int x,int y,int width,int height,COLORREF color,int styleOverride=-1) {
     auto it=history.find(sensor.key);size_t valid=0;
     double low=HUGE_VAL,high=-HUGE_VAL;
     if(it!=history.end())for(float v:it->second)if(isfinite(v)){low=std::min(low,(double)v);high=std::max(high,(double)v);++valid;}
-    if(!valid){HFONT f=(HFONT)SelectObject(dc,fontHandle);OutlinedText(dc,x+5,y+5,L"等待有效数据",RGB(165,165,165));SelectObject(dc,f);return;}
+    const bool suggestIssue=sensor.source==0x50&&!sensor.valid&&ShouldSuggestFrameIssue();
+    if(!valid||suggestIssue){
+        HFONT f=(HFONT)SelectObject(dc,fontHandle);
+        OutlinedText(dc,x+5,y+5,suggestIssue?L"无帧率 · 托盘反馈":L"等待有效数据",RGB(165,165,165));
+        SelectObject(dc,f);
+        return;
+    }
     if(high==low){double pad=std::max(1.0,fabs(low)*0.05);low-=pad;high+=pad;}
     else {double pad=(high-low)*0.08;low-=pad;high+=pad;}
     int mode=styleOverride>=0?styleOverride:Setting(L"GraphStyle",0);
@@ -533,7 +546,7 @@ static LRESULT CALLBACK PickerProc(HWND h,UINT m,WPARAM w,LPARAM l){
         c=SettingControl(h,L"BUTTON",L"自动启动独立 FPS 采集",35,344,304,350,25,BS_AUTOCHECKBOX);SendMessageW(c,BM_SETCHECK,captureEnabled,0);
         SettingControl(h,L"STATIC",L"目标 PID (0 自动)",44,344,346,180,24);
         SettingControl(h,L"EDIT",std::to_wstring(configuredTarget).c_str(),39,540,342,166,26,WS_BORDER|ES_NUMBER);
-        SettingControl(h,L"STATIC",fpsStatus.c_str(),46,344,388,366,60);
+        SettingControl(h,L"STATIC",FrameSettingsStatus().c_str(),46,344,388,366,60);
         SettingControl(h,L"STATIC",L"60",45,344,462,230,50);
         SendMessageW(GetDlgItem(h,45),WM_SETFONT,(WPARAM)osdFont,TRUE);
         SettingControl(h,L"STATIC",L"F11 全屏 / Esc 返回 · 坐标原点：左上角",47,344,514,366,24);
@@ -556,7 +569,7 @@ static LRESULT CALLBACK PickerProc(HWND h,UINT m,WPARAM w,LPARAM l){
             settingsLayoutQueued=false;
             LayoutPicker(h);
         }else if(w==1&&!settingsDragging){
-            if(settingsSection==0)SetWindowTextW(GetDlgItem(h,46),fpsStatus.c_str());
+            if(settingsSection==0)SetWindowTextW(GetDlgItem(h,46),FrameSettingsStatus().c_str());
             else resolutionui::Status();
         }
         return 0;
@@ -596,7 +609,7 @@ static LRESULT CALLBACK PickerProc(HWND h,UINT m,WPARAM w,LPARAM l){
             RedrawWindow(h,NULL,NULL,RDW_INVALIDATE|RDW_ERASE|RDW_ALLCHILDREN);return 0;
         }
         if(id==80||id==81){SelectSettingsSection(id-80);return 0;}
-        if(id==82){std::wstring notice=L"AeroPanel v3.0.4\n硬件监控 + 分辨率切换\n功能参考：github.com/Drinkwater10086/aeropanel\n分辨率模块独立原生实现。\n\n内嵌 PresentMon 2.3.1 许可证：\n"+Wide(CaptureLicense,sizeof(CaptureLicense)-1);MessageBoxW(h,notice.c_str(),L"关于与第三方许可",MB_ICONINFORMATION);return 0;}
+        if(id==82){std::wstring notice=L"AeroPanel v3.0.5\n硬件监控 + 分辨率切换\n功能参考：github.com/Drinkwater10086/aeropanel\n分辨率模块独立原生实现。\n\n内嵌 PresentMon 2.3.1 许可证：\n"+Wide(CaptureLicense,sizeof(CaptureLicense)-1);MessageBoxW(h,notice.c_str(),L"关于与第三方许可",MB_ICONINFORMATION);return 0;}
         if(id>=100&&id<=121){resolutionui::Command(id);return 0;}
         if(id==11||id==12){SendMessageW(sensorList,LB_SETSEL,id==11,-1);return 0;}
         if(id==13){WritePrivateProfileStringW(L"Selection",L"FollowAfterburner",L"0",iniPath);
@@ -669,6 +682,7 @@ static void ShowMenu(){
     AppendMenuW(menu,MF_STRING,2,L"使用 Afterburner 当前 OSD 选择");
     AppendMenuW(menu,MF_STRING,3,fpsProcess?L"停止独立 FPS 采集":L"启用独立 FPS 采集");
     AppendMenuW(menu,MF_STRING|(apiAdmin?MF_CHECKED:0),14,L"增强 API 识别（管理员）");
+    AppendMenuW(menu,MF_STRING,15,L"反馈帧率缺失（GitHub Issue）");
     AppendMenuW(menu,MF_SEPARATOR,0,NULL);
     AppendMenuW(menu,MF_STRING|(transparentBackground?MF_CHECKED:0),7,L"透明背景");
     AppendMenuW(menu,MF_STRING|(clickThrough?MF_CHECKED:0),8,L"鼠标穿透（透明模式）");
@@ -686,6 +700,13 @@ static void ShowMenu(){
     if(id==2){followAfterburner=true;WritePrivateProfileStringW(L"Selection",L"FollowAfterburner",L"1",iniPath);scrollRow=0;ReadSensors();}
     if(id==3){captureEnabled=!captureEnabled;WritePrivateProfileStringW(L"Capture",L"Enabled",captureEnabled?L"1":L"0",iniPath);if(captureEnabled)StartFrames();else StopFrames();}
     if(id==14)SetApiAdmin(!apiAdmin);
+    if(id==15){
+        const auto result=ShellExecuteW(panel,L"open",
+            L"https://github.com/Drinkwater10086/aeropanel/issues/new?title=%5BFPS%5D%20",
+            NULL,NULL,SW_SHOWNORMAL);
+        if((INT_PTR)result<=32)MessageBoxW(panel,L"请访问 github.com/Drinkwater10086/aeropanel/issues",
+            L"无法打开反馈页面",MB_OK|MB_ICONINFORMATION);
+    }
     if(id==4){LoadSettings();if(captureEnabled)StartFrames();else StopFrames();ApplyAppearance();SetTimer(panel,1,interval,NULL);RestorePosition();ReadSensors();}
     if(id==6){panelVisible=!panelVisible;if(panelVisible)RestorePosition();else ShowWindow(panel,SW_HIDE);}
     if(id==7){transparentBackground=!transparentBackground;SetLocal(L"Transparent",transparentBackground);ApplyAppearance();}

@@ -42,20 +42,24 @@ static unsigned ResolveStack(DWORD pid,const std::vector<ULONGLONG>& addresses,D
  CloseHandle(snapshot);return apiidentity::StackMask(names);
 }
 static const GUID dxgiProvider={0xca11c036,0x0102,0x4a2d,{0xa6,0xad,0xf0,0x3c,0xfe,0xd5,0xd3,0xc9}};
-static void ReportDxgiPresent(EVENT_RECORD* record){
+static const GUID d3d9Provider={0x783aca0a,0x790e,0x4d7f,{0x84,0x51,0xaa,0x85,0x05,0x11,0xc6,0xb9}};
+static void ReportPresent(EVENT_RECORD* record,bool d3d9){
     const auto& header=record->EventHeader;
-    if(!reportEvents||header.EventDescriptor.Id!=178||header.EventDescriptor.Version!=0)return;
+    const auto id=header.EventDescriptor.Id;
+    if(!reportEvents||header.EventDescriptor.Version!=0||
+        (d3d9?id!=1:(id!=42&&id!=178)))return;
     const size_t pointerSize=(header.Flags&EVENT_HEADER_FLAG_64_BIT_HEADER)?8:4;
-    if(record->UserDataLength<pointerSize+8)return;
+    if(record->UserDataLength<pointerSize+(d3d9?4:8))return;
     ULONGLONG chain=0;DWORD flags=0;
     memcpy(&chain,record->UserData,pointerSize);
-    memcpy(&flags,(const BYTE*)record->UserData+pointerSize+4,sizeof(flags));
+    if(!d3d9)memcpy(&flags,(const BYTE*)record->UserData+pointerSize+4,sizeof(flags));
     if(!chain||(flags&1))return; // DXGI_PRESENT_TEST does not submit a frame.
-    printf("PRESENT,%lu,%llu,%lld\n",header.ProcessId,chain,header.TimeStamp.QuadPart);
+    printf("PRESENT,%lu,%u,%llu,%lld\n",header.ProcessId,id,chain,header.TimeStamp.QuadPart);
     fflush(stdout);
 }
 static void WINAPI Event(EVENT_RECORD* record){
- if(IsEqualGUID(record->EventHeader.ProviderId,dxgiProvider)){ReportDxgiPresent(record);return;}
+ if(IsEqualGUID(record->EventHeader.ProviderId,dxgiProvider)){ReportPresent(record,false);return;}
+ if(IsEqualGUID(record->EventHeader.ProviderId,d3d9Provider)){ReportPresent(record,true);return;}
  bool kernel=IsEqualGUID(record->EventHeader.ProviderId,providers[0]);
  unsigned id=record->EventHeader.EventDescriptor.Id;
  if(kernel?!(id==27||id==30):!(record->EventHeader.EventDescriptor.Task==2&&(id==3||id==5)))return;
@@ -108,13 +112,20 @@ static bool Start(){
  for(const auto& provider:providers){ULONG result=EnableTraceEx2(session,&provider,EVENT_CONTROL_CODE_ENABLE_PROVIDER,TRACE_LEVEL_VERBOSE,
   provider.Data1==0x802ec45a?0x40:2,0,0,&parameters);
   if(reportEvents){printf("PROVIDER,%08lX,%lu\n",provider.Data1,result);fflush(stdout);}enabled|=result==ERROR_SUCCESS;}
- struct {BOOLEAN FilterIn;UCHAR Reserved;USHORT Count;USHORT Events[1];} filter={TRUE,0,1,{178}};
- EVENT_FILTER_DESCRIPTOR descriptor={(ULONGLONG)(uintptr_t)&filter,sizeof(filter),0x80000200};
- ENABLE_TRACE_PARAMETERS dxgi={};dxgi.Version=ENABLE_TRACE_PARAMETERS_VERSION_2;
- dxgi.EnableFilterDesc=&descriptor;dxgi.FilterDescCount=1;
- ULONG dxgiResult=EnableTraceEx2(session,&dxgiProvider,EVENT_CONTROL_CODE_ENABLE_PROVIDER,TRACE_LEVEL_VERBOSE,0,0,0,&dxgi);
- if(reportEvents){printf("PROVIDER,CA11C036,%lu\n",dxgiResult);fflush(stdout);}
- if(!enabled&&dxgiResult!=ERROR_SUCCESS){Stop();return false;}
+ // EVENT_FILTER_TYPE_EVENT_ID and EVENT_FILTER_EVENT_ID from the Windows SDK.
+ struct PresentFilter {BOOLEAN include;UCHAR reserved;USHORT count;USHORT events[2];};
+ auto enablePresent=[&](const GUID& provider,PresentFilter filter){
+  EVENT_FILTER_DESCRIPTOR descriptor={(ULONGLONG)(uintptr_t)&filter,
+      (ULONG)(offsetof(PresentFilter,events)+sizeof(USHORT)*filter.count),0x80000200};
+  ENABLE_TRACE_PARAMETERS options={};options.Version=ENABLE_TRACE_PARAMETERS_VERSION_2;
+  options.EnableFilterDesc=&descriptor;options.FilterDescCount=1;
+  ULONG result=EnableTraceEx2(session,&provider,EVENT_CONTROL_CODE_ENABLE_PROVIDER,TRACE_LEVEL_VERBOSE,0,0,0,&options);
+  if(reportEvents){printf("PROVIDER,%08lX,%lu\n",provider.Data1,result);fflush(stdout);}
+  enabled|=result==ERROR_SUCCESS;
+ };
+ enablePresent(dxgiProvider,{TRUE,0,2,{42,178}});
+ enablePresent(d3d9Provider,{TRUE,0,1,{1,0}});
+ if(!enabled){Stop();return false;}
  return true;
 }
 }

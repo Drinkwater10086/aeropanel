@@ -74,7 +74,7 @@ PASS single_exe_extracts_verified_capture_runtime
 PASS existing_capture_runtime_verified_and_reused
 PASS replay_real_delta_force_capture_rows
 PASS real_delta_force_capture_fps_regression
-BENCH percentile_2000_iterations full_sort_ms=92.080 partial_selection_ms=16.825 speed_ratio=5.473
+BENCH percentile_2000_iterations full_sort_ms=89.721 partial_selection_ms=16.953 speed_ratio=5.292
 PASS silver_wolf_tray_icon_resource_loads
 PASS two_sections_created_in_same_window
 PASS preblurred_background_loaded_at_fixed_size

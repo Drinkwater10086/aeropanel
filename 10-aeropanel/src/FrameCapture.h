@@ -105,6 +105,8 @@ static void SelectFrameStream(){
     DWORD pinned=fixedFpsTarget?fpsTarget:configuredTarget;
     for(const auto& entry:streams){const auto& key=entry.first;const auto& value=entry.second;
         if(now-value.last>2500||value.recent.empty())continue;
+        const bool raw=key.second.rfind("raw-present-",0)==0;
+        if(raw&&key.first!=(pinned?pinned:lastForeground))continue;
         int priority=0;
         if(pinned){if(key.first!=pinned)continue;priority=10;}
         else {if(!EligibleAutomatic(value))continue;
@@ -112,7 +114,7 @@ static void SelectFrameStream(){
             else if(!foregroundName.empty()&&!_wcsicmp(foregroundName.c_str(),value.name.c_str()))priority=4;
             else if(key==activeStream)priority=2;
         }
-        priority=priority*2+(key.second.rfind("raw-dxgi-",0)!=0);
+        priority=priority*2+!raw;
         if(priority>bestPriority||(priority==bestPriority&&value.recent.size()>bestCount)){
             best=key;bestPriority=priority;bestCount=value.recent.size();
         }
@@ -133,21 +135,25 @@ static void StoreFrame(const FrameKey& key,FrameStream& stream,double ms){
     while(stream.recent.size()>512||(!stream.recent.empty()&&tick-stream.recent.front().tick>2000))stream.recent.pop_front();
     if(key==activeStream){frameTimes.push_back(ms);if(frameTimes.size()>4096)frameTimes.pop_front();totalMs+=ms;++totalFrames;lastFrameTick=tick;}
 }
-static void ReadDxgiPresent(const std::string& line){
-    DWORD pid=0;unsigned long long chain=0;long long stamp=0;
-    if(sscanf(line.c_str(),"PRESENT,%lu,%llu,%lld",&pid,&chain,&stamp)!=3||
-        !pid||pid!=lastForeground)return;
-    const bool verifiedDxgiTarget=!_wcsicmp(foregroundName.c_str(),L"ForzaHorizon4.exe")||
-        !_wcsicmp(foregroundName.c_str(),L"cs2.exe");
-    if(!verifiedDxgiTarget)return;
+static void ReadRawPresent(const std::string& line){
+    DWORD pid=0;unsigned event=0;unsigned long long chain=0;long long stamp=0;
+    if(sscanf(line.c_str(),"PRESENT,%lu,%u,%llu,%lld",&pid,&event,&chain,&stamp)!=4||
+        !pid||!chain||stamp<=0||(event!=1&&event!=42&&event!=178))return;
+    DWORD pinned=fixedFpsTarget?fpsTarget:configuredTarget;
+    if(pid!=(pinned?pinned:lastForeground))return;
+    const auto name=pid==lastForeground?foregroundName:ProcessName(pid);
+    FrameStream source;
+    source.name=name;
+    if(!pinned&&(name.empty()||!EligibleAutomatic(source)))return;
     static std::map<FrameKey,long long> previous;
     if(previous.size()>=128)previous.clear();
-    FrameKey key={pid,"raw-dxgi-"+std::to_string(chain)};
+    // Keep legacy and detailed events apart. Some runtimes emit both per call.
+    FrameKey key={pid,"raw-present-"+std::to_string(event)+"-"+std::to_string(chain)};
     auto& last=previous[key];const auto delta=stamp-last;const auto old=last;last=stamp;
     static const long long frequency=[](){LARGE_INTEGER f={};QueryPerformanceFrequency(&f);return f.QuadPart;}();
     if(!old||!frequency||delta<=0||delta>=frequency*2)return;
     if(streams.size()>=128&&!streams.count(key))return;
-    auto& stream=streams[key];stream.name=foregroundName;stream.runtime=L"DXGI";
+    auto& stream=streams[key];stream.name=name;stream.runtime=event==1?L"D3D9":L"DXGI";
     StoreFrame(key,stream,1000.0*delta/frequency);
 }
 static void ParseFrameLine(const std::string& line){
