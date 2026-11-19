@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "AeroPanel Video FPS",
+  "version": "1.0.0",
+  "permissions": [
+    "activeTab",
+    "scripting"
+  ],
+  "background": {
+    "service_worker": "worker.js"
+  },
+  "action": {
+    "default_title": "Toggle Video FPS"
+  }
+}

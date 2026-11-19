@@ -4,6 +4,7 @@
 #ifndef UNICODE
 #define UNICODE
 #endif
+#include <winsock2.h>
 #include <windows.h>
 #include <psapi.h>
 #include <shellapi.h>
@@ -26,7 +27,7 @@ static LONG_PTR settingsWindowStyle=0;
 static HFONT fontHandle;
 static HFONT settingsFont=NULL,settingsPreviewFont=NULL;
 static int settingsFontPixels=0;
-static HFONT osdFont;
+static HFONT osdFont, graphValueFont;
 static HBRUSH settingsBrush;
 static HINSTANCE appInstance;
 static wchar_t iniPath[MAX_PATH], logPath[MAX_PATH], folder[MAX_PATH];
@@ -77,6 +78,7 @@ static void Log(const wchar_t* text) {
 }
 #include "CaptureRuntime.h"
 #include "ApiRuntime.h"
+#include "VideoBridge.h"
 #include "FrameCapture.h"
 #include "ResolutionEngine.h"
 
@@ -194,6 +196,9 @@ static void ApplyAppearance() {
     if(osdFont)DeleteObject(osdFont);
     osdFont=CreateFontW(-fontSize,0,0,0,FW_BOLD,FALSE,FALSE,FALSE,DEFAULT_CHARSET,
         OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,NONANTIALIASED_QUALITY,FIXED_PITCH,L"Consolas");
+    if(graphValueFont)DeleteObject(graphValueFont);
+    graphValueFont=CreateFontW(-(fontSize+(fontSize+2)/4),0,0,0,FW_BOLD,FALSE,FALSE,FALSE,DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,NONANTIALIASED_QUALITY,FIXED_PITCH,L"Consolas");
 }
 static void ReleaseLayer() {
     if(layerDC&&previousBitmap)SelectObject(layerDC,previousBitmap);
@@ -284,11 +289,13 @@ static void PaintCompact(HDC dc,RECT rect) {
         OutlinedText(dc,0,y,graphTitle,RGB(195,125,150));
         y+=line;
         std::wstring graphValue=ValueText(s);SIZE valueSize={};
+        HGDIOBJ previousFont=graphValueFont?SelectObject(dc,graphValueFont):NULL;
         GetTextExtentPoint32W(dc,graphValue.c_str(),(int)graphValue.size(),&valueSize);
         int curveWidth=std::min(330,std::max(0,(int)rect.right-(int)valueSize.cx-14));
         if(curveWidth>=12)DrawCurve(dc,s,0,y,curveWidth,36,RGB(195,125,150));
         OutlinedText(dc,curveWidth+10,y+std::max(0,(36-(int)valueSize.cy)/2),graphValue,
             s.valid?RGB(255,145,0):RGB(165,165,165));
+        if(previousFont)SelectObject(dc,previousFont);
         y+=std::max(44,(int)valueSize.cy+8);}
     SelectObject(dc,old);
 }
@@ -555,7 +562,7 @@ static LRESULT CALLBACK PickerProc(HWND h,UINT m,WPARAM w,LPARAM l){
             RedrawWindow(h,NULL,NULL,RDW_INVALIDATE|RDW_ERASE|RDW_ALLCHILDREN);return 0;
         }
         if(id==80||id==81){SelectSettingsSection(id-80);return 0;}
-        if(id==82){std::wstring notice=L"AeroPanel v3.0.1\n硬件监控 + 分辨率切换\n功能参考：github.com/Drinkwater10086/aeropanel\n分辨率模块独立原生实现。\n\n内嵌 PresentMon 2.3.1 许可证：\n"+Wide(CaptureLicense,sizeof(CaptureLicense)-1);MessageBoxW(h,notice.c_str(),L"关于与第三方许可",MB_ICONINFORMATION);return 0;}
+        if(id==82){std::wstring notice=L"AeroPanel v3.0.2\n硬件监控 + 分辨率切换\n功能参考：github.com/Drinkwater10086/aeropanel\n分辨率模块独立原生实现。\n\n内嵌 PresentMon 2.3.1 许可证：\n"+Wide(CaptureLicense,sizeof(CaptureLicense)-1);MessageBoxW(h,notice.c_str(),L"关于与第三方许可",MB_ICONINFORMATION);return 0;}
         if(id>=100&&id<=121){resolutionui::Command(id);return 0;}
         if(id==11||id==12){SendMessageW(sensorList,LB_SETSEL,id==11,-1);return 0;}
         if(id==13){WritePrivateProfileStringW(L"Selection",L"FollowAfterburner",L"0",iniPath);
@@ -656,7 +663,7 @@ static LRESULT CALLBACK PanelProc(HWND h,UINT m,WPARAM w,LPARAM l){
     case WM_TIMER:
         if(quitAt&&GetTickCount64()>=quitAt){DestroyWindow(h);return 0;}
         if(w==1){ReadSensors();RestorePosition();RefreshPanel();if(!trayAdded)AddTray();}
-        if(w==2){TrackForeground();ReadFrames();resolution::Tick();}return 0;
+        if(w==2){TrackForeground();videoBridge::Poll();ReadFrames();resolution::Tick();}return 0;
     case WM_MOUSEACTIVATE:return MA_NOACTIVATE;
     case WM_MOUSEWHEEL:{int delta=(short)HIWORD(w);int count=0;for(const Sensor& s:sensors)if(s.selected)++count;
         scrollRow=Clamp(scrollRow+(delta>0?-3:3),0,std::max(0,count-1));RefreshPanel();return 0;}
@@ -717,6 +724,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR command,int){
         }
         DestroyWindow(panel);
     }else{
+        videoBridge::Start();
         AddTray();RestorePosition();RefreshPanel();SetTimer(panel,1,interval,NULL);SetTimer(panel,2,250,NULL);
         if(wcsstr(command,L"--verify-tray")){
             bool first=trayAdded;DeleteTray();SendMessageW(panel,taskbarCreated,0,0);
@@ -735,10 +743,11 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR command,int){
         TranslateMessage(&msg);DispatchMessageW(&msg);
     }
     if(wcsstr(command,L"--render-check")){SaveRenderDiagnostics();if(!VerifyCurveRendering())checkExit=5;}
+    videoBridge::Stop();
     StopFrames();
     PROCESS_MEMORY_COUNTERS_EX memory={};memory.cb=sizeof(memory);wchar_t stats[260];
     if(GetProcessMemoryInfo(GetCurrentProcess(),(PROCESS_MEMORY_COUNTERS*)&memory,sizeof(memory))){
         swprintf(stats,260,L"Stopped: updates=%lu exportedSensors=%u fpsFrames=%llu workingSet=%.2fMiB privateCommit=%.2fMiB",
             (unsigned long)updateCount,(unsigned)sensors.size(),totalFrames,memory.WorkingSetSize/1048576.0,memory.PrivateUsage/1048576.0);Log(stats);}
-    ReleaseLayer();if(osdFont)DeleteObject(osdFont);DeleteObject(fontHandle);DeleteObject(settingsBrush);if(trayIcon)DestroyIcon(trayIcon);CloseHandle(mutex);return result==-1?3:checkExit;
+    ReleaseLayer();if(osdFont)DeleteObject(osdFont);if(graphValueFont)DeleteObject(graphValueFont);DeleteObject(fontHandle);DeleteObject(settingsBrush);if(trayIcon)DestroyIcon(trayIcon);CloseHandle(mutex);return result==-1?3:checkExit;
 }

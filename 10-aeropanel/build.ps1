@@ -29,7 +29,7 @@ try {
         $output = Join-Path $build 'SuiteTests.exe'
         $link = @()
     }
-    & $compiler c++ $source $resource -o $output -target x86-windows-gnu -Os -s @link -municode -fno-exceptions -fno-rtti -luser32 -lgdi32 -lpsapi -lshell32 -ldwmapi -lcomdlg32 -lole32 -luuid
+    & $compiler c++ $source $resource -o $output -target x86-windows-gnu -Os -s @link -municode -fno-exceptions -fno-rtti -lws2_32 -luser32 -lgdi32 -lpsapi -lshell32 -ldwmapi -lcomdlg32 -lole32 -luuid
     if ($LASTEXITCODE -ne 0) { throw "Build failed: $LASTEXITCODE" }
     if ($Tests) {
         & $output

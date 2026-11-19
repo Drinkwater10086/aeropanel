@@ -57,7 +57,13 @@ static bool DesktopIdle(){
     for(const auto& entry:streams)if(EligibleAutomatic(entry.second)&&now-entry.second.last<=2500)return false;
     return true;
 }
+static bool BrowserVideoActive(){
+    return captureEnabled&&!fixedFpsTarget&&!configuredTarget&&
+        !_wcsicmp(foregroundName.c_str(),L"chrome.exe")&&videoBridge::received&&
+        GetTickCount64()-videoBridge::received<=2500;
+}
 static std::wstring FrameApiLabel(){
+    if(BrowserVideoActive())return L"Video";
     if(DesktopIdle())return L"GDI";
     auto found=streams.find(activeStream);
     if(found==streams.end()||GetTickCount64()-found->second.last>2500)return L"FPS";
@@ -69,6 +75,15 @@ static std::wstring FrameApiLabel(){
     return L"FPS";
 }
 static double FrameValue(DWORD id){
+    if(BrowserVideoActive()){
+        switch(id){
+        case 0x50:return videoBridge::fps;
+        case 0x51:return videoBridge::ms;
+        case 0x53:return videoBridge::average;
+        case 0x55:return videoBridge::low>0?videoBridge::low:HUGE_VAL;
+        default:return HUGE_VAL;
+        }
+    }
     // Desktop values describe this OSD's fixed 1 Hz refresh, not game rendering latency.
     if(DesktopIdle())return id==0x51?1000.0:IsFrameSource(id)?1.0:HUGE_VAL;
     if(!fpsProcess||frameTimes.empty()||GetTickCount64()-lastFrameTick>2500)return HUGE_VAL;
