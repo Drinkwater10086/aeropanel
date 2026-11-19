@@ -112,6 +112,7 @@ static void SelectFrameStream(){
             else if(!foregroundName.empty()&&!_wcsicmp(foregroundName.c_str(),value.name.c_str()))priority=4;
             else if(key==activeStream)priority=2;
         }
+        priority=priority*2+(key.second.rfind("raw-dxgi-",0)!=0);
         if(priority>bestPriority||(priority==bestPriority&&value.recent.size()>bestCount)){
             best=key;bestPriority=priority;bestCount=value.recent.size();
         }
@@ -126,6 +127,28 @@ static void SelectFrameStream(){
         lastFrameTick=stream.last;std::wstring log=L"FPS target selected: "+fpsTargetName+L" PID="+std::to_wstring(fpsTarget);Log(log.c_str());
     }
     fpsStatus=L"FPS："+stream.name+L" · 已接收 "+std::to_wstring(totalFrames)+L" 帧";
+}
+static void StoreFrame(const FrameKey& key,FrameStream& stream,double ms){
+    ULONGLONG tick=GetTickCount64();stream.last=tick;stream.recent.push_back({ms,tick});
+    while(stream.recent.size()>512||(!stream.recent.empty()&&tick-stream.recent.front().tick>2000))stream.recent.pop_front();
+    if(key==activeStream){frameTimes.push_back(ms);if(frameTimes.size()>4096)frameTimes.pop_front();totalMs+=ms;++totalFrames;lastFrameTick=tick;}
+}
+static void ReadDxgiPresent(const std::string& line){
+    DWORD pid=0;unsigned long long chain=0;long long stamp=0;
+    if(sscanf(line.c_str(),"PRESENT,%lu,%llu,%lld",&pid,&chain,&stamp)!=3||
+        !pid||pid!=lastForeground)return;
+    const bool verifiedDxgiTarget=!_wcsicmp(foregroundName.c_str(),L"ForzaHorizon4.exe")||
+        !_wcsicmp(foregroundName.c_str(),L"cs2.exe");
+    if(!verifiedDxgiTarget)return;
+    static std::map<FrameKey,long long> previous;
+    if(previous.size()>=128)previous.clear();
+    FrameKey key={pid,"raw-dxgi-"+std::to_string(chain)};
+    auto& last=previous[key];const auto delta=stamp-last;const auto old=last;last=stamp;
+    static const long long frequency=[](){LARGE_INTEGER f={};QueryPerformanceFrequency(&f);return f.QuadPart;}();
+    if(!old||!frequency||delta<=0||delta>=frequency*2)return;
+    if(streams.size()>=128&&!streams.count(key))return;
+    auto& stream=streams[key];stream.name=foregroundName;stream.runtime=L"DXGI";
+    StoreFrame(key,stream,1000.0*delta/frequency);
 }
 static void ParseFrameLine(const std::string& line){
     auto fields=CsvRow(line);
@@ -149,9 +172,7 @@ static void ParseFrameLine(const std::string& line){
         size_t slash=stream.name.find_last_of(L"\\/");if(slash!=std::wstring::npos)stream.name.erase(0,slash+1);
         if(stream.name.empty())stream.name=L"PID "+std::to_wstring(pid);
     }
-    ULONGLONG tick=GetTickCount64();stream.last=tick;stream.recent.push_back({ms,tick});
-    while(stream.recent.size()>512||(!stream.recent.empty()&&tick-stream.recent.front().tick>2000))stream.recent.pop_front();
-    if(key==activeStream){frameTimes.push_back(ms);if(frameTimes.size()>4096)frameTimes.pop_front();totalMs+=ms;++totalFrames;lastFrameTick=tick;}
+    StoreFrame(key,stream,ms);
 }
 static void ReadFrames(){
     ReadApi();
@@ -173,7 +194,7 @@ static void ReadFrames(){
     }
     ULONGLONG now=GetTickCount64();for(auto it=streams.begin();it!=streams.end();)if(now-it->second.last>10000)it=streams.erase(it);else ++it;
     SelectFrameStream();DWORD code=0;
-    if(pidColumn<0&&now-captureStarted>8000)fpsStatus=L"帧率数据暂不可用：采集器未收到画面帧";
+    if(pidColumn<0&&now-lastFrameTick>2500&&now-captureStarted>8000)fpsStatus=L"帧率数据暂不可用：采集器未收到画面帧";
     if(GetExitCodeProcess(fpsProcess,&code)&&code!=STILL_ACTIVE){
         CloseHandle(fpsProcess);fpsProcess=NULL;if(fpsPipe)CloseHandle(fpsPipe);fpsPipe=NULL;
         if(fpsErrorPipe)CloseHandle(fpsErrorPipe);fpsErrorPipe=NULL;if(fpsJob)CloseHandle(fpsJob);fpsJob=NULL;

@@ -31,7 +31,7 @@ PASS normal_exit_restores_active_session
 PASS corrupt_recovery_is_not_applied
 PASS real_primary_display_readable
 PASS real_driver_accepts_current_mode_without_switch
-INFO real_auto_4x3_supported=1 driver_code=0 current=3840x2160@240
+INFO real_auto_4x3_supported=1 driver_code=0 current=1920x1080@480
 PASS unicode_configuration_write
 PASS unicode_configuration_roundtrip
 PASS startup_shortcut_created_in_test_directory
@@ -74,7 +74,7 @@ PASS single_exe_extracts_verified_capture_runtime
 PASS existing_capture_runtime_verified_and_reused
 PASS replay_real_delta_force_capture_rows
 PASS real_delta_force_capture_fps_regression
-BENCH percentile_2000_iterations full_sort_ms=91.202 partial_selection_ms=16.684 speed_ratio=5.467
+BENCH percentile_2000_iterations full_sort_ms=92.080 partial_selection_ms=16.825 speed_ratio=5.473
 PASS silver_wolf_tray_icon_resource_loads
 PASS two_sections_created_in_same_window
 PASS preblurred_background_loaded_at_fixed_size

@@ -41,7 +41,21 @@ static unsigned ResolveStack(DWORD pid,const std::vector<ULONGLONG>& addresses,D
  }while(Module32NextW(snapshot,&module));else error=GetLastError();
  CloseHandle(snapshot);return apiidentity::StackMask(names);
 }
+static const GUID dxgiProvider={0xca11c036,0x0102,0x4a2d,{0xa6,0xad,0xf0,0x3c,0xfe,0xd5,0xd3,0xc9}};
+static void ReportDxgiPresent(EVENT_RECORD* record){
+    const auto& header=record->EventHeader;
+    if(!reportEvents||header.EventDescriptor.Id!=178||header.EventDescriptor.Version!=0)return;
+    const size_t pointerSize=(header.Flags&EVENT_HEADER_FLAG_64_BIT_HEADER)?8:4;
+    if(record->UserDataLength<pointerSize+8)return;
+    ULONGLONG chain=0;DWORD flags=0;
+    memcpy(&chain,record->UserData,pointerSize);
+    memcpy(&flags,(const BYTE*)record->UserData+pointerSize+4,sizeof(flags));
+    if(!chain||(flags&1))return; // DXGI_PRESENT_TEST does not submit a frame.
+    printf("PRESENT,%lu,%llu,%lld\n",header.ProcessId,chain,header.TimeStamp.QuadPart);
+    fflush(stdout);
+}
 static void WINAPI Event(EVENT_RECORD* record){
+ if(IsEqualGUID(record->EventHeader.ProviderId,dxgiProvider)){ReportDxgiPresent(record);return;}
  bool kernel=IsEqualGUID(record->EventHeader.ProviderId,providers[0]);
  unsigned id=record->EventHeader.EventDescriptor.Id;
  if(kernel?!(id==27||id==30):!(record->EventHeader.EventDescriptor.Task==2&&(id==3||id==5)))return;
@@ -86,7 +100,7 @@ static bool Start(){
  if(session)return true;swprintf(sessionName,96,L"AeroPanel-API-%lu",GetCurrentProcessId());
  std::vector<BYTE> memory;Properties(memory);ULONG result=StartTraceW(&session,sessionName,(EVENT_TRACE_PROPERTIES*)memory.data());
  if(result){session=0;return false;}
- EVENT_TRACE_LOGFILEW log={};log.LoggerName=sessionName;log.ProcessTraceMode=PROCESS_TRACE_MODE_REAL_TIME|PROCESS_TRACE_MODE_EVENT_RECORD;log.EventRecordCallback=Event;
+ EVENT_TRACE_LOGFILEW log={};log.LoggerName=sessionName;log.ProcessTraceMode=PROCESS_TRACE_MODE_REAL_TIME|PROCESS_TRACE_MODE_EVENT_RECORD|PROCESS_TRACE_MODE_RAW_TIMESTAMP;log.EventRecordCallback=Event;
  consumer=OpenTraceW(&log);if(consumer==INVALID_PROCESSTRACE_HANDLE){Stop();return false;}
  thread=CreateThread(NULL,0,Consume,NULL,0,NULL);if(!thread){Stop();return false;}
  ENABLE_TRACE_PARAMETERS parameters={};parameters.Version=ENABLE_TRACE_PARAMETERS_VERSION_2;parameters.EnableProperty=EVENT_ENABLE_PROPERTY_STACK_TRACE;
@@ -94,7 +108,13 @@ static bool Start(){
  for(const auto& provider:providers){ULONG result=EnableTraceEx2(session,&provider,EVENT_CONTROL_CODE_ENABLE_PROVIDER,TRACE_LEVEL_VERBOSE,
   provider.Data1==0x802ec45a?0x40:2,0,0,&parameters);
   if(reportEvents){printf("PROVIDER,%08lX,%lu\n",provider.Data1,result);fflush(stdout);}enabled|=result==ERROR_SUCCESS;}
- if(!enabled){Stop();return false;}
+ struct {BOOLEAN FilterIn;UCHAR Reserved;USHORT Count;USHORT Events[1];} filter={TRUE,0,1,{178}};
+ EVENT_FILTER_DESCRIPTOR descriptor={(ULONGLONG)(uintptr_t)&filter,sizeof(filter),0x80000200};
+ ENABLE_TRACE_PARAMETERS dxgi={};dxgi.Version=ENABLE_TRACE_PARAMETERS_VERSION_2;
+ dxgi.EnableFilterDesc=&descriptor;dxgi.FilterDescCount=1;
+ ULONG dxgiResult=EnableTraceEx2(session,&dxgiProvider,EVENT_CONTROL_CODE_ENABLE_PROVIDER,TRACE_LEVEL_VERBOSE,0,0,0,&dxgi);
+ if(reportEvents){printf("PROVIDER,CA11C036,%lu\n",dxgiResult);fflush(stdout);}
+ if(!enabled&&dxgiResult!=ERROR_SUCCESS){Stop();return false;}
  return true;
 }
 }

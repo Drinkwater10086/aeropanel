@@ -37,6 +37,7 @@ static bool EnsureApiRuntime(){
 static bool ConnectedApi(const ApiChannel& channel){
  DWORD client=0;return channel.pipe&&GetNamedPipeClientProcessId(channel.pipe,&client)&&client==channel.childPid;
 }
+static void ReadDxgiPresent(const std::string& line);
 static void ReadApiChannel(ApiChannel& channel){
  if(!ConnectedApi(channel))return;DWORD available=0;char buffer[4096];
  for(int i=0;i<8&&PeekNamedPipe(channel.pipe,NULL,0,NULL,&available,NULL)&&available;++i){DWORD got=0;
@@ -53,6 +54,7 @@ static void ReadApiChannel(ApiChannel& channel){
    }else if(&channel==&apiCollector&&line.rfind("STACK,",0)==0&&line.size()<4096&&ConnectedApi(apiBroker)){
     line+='\n';DWORD written=0;WriteFile(apiBroker.pipe,line.data(),(DWORD)line.size(),&written,NULL);
    }else if(line=="ELEVATED,1")Log(L"Graphics API broker elevation verified.");
+   else if(&channel==&apiCollector&&line.rfind("PRESENT,",0)==0)ReadDxgiPresent(line);
    else if(line.rfind("PROVIDER,",0)==0){std::wstring message=L"API trace "+Wide(line.c_str(),line.size());Log(message.c_str());}
    else if(line=="READY,0")Log(L"Graphics API detection unavailable; retaining present-runtime fallback.");
   }
