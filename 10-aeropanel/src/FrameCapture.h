@@ -1,5 +1,6 @@
 ﻿#pragma once
 #include <tlhelp32.h>
+#include <string_view>
 // PresentMon 2.3.1 --output_stdout --v1_metrics, verified against actual CSV.
 static HANDLE fpsProcess=NULL,fpsPipe=NULL,fpsErrorPipe=NULL,fpsJob=NULL;
 static DWORD fpsTarget=0,lastForeground=0,configuredTarget=0;
@@ -18,12 +19,38 @@ using FrameKey=std::pair<DWORD,std::string>;
 static std::map<FrameKey,FrameStream> streams;
 static FrameKey activeStream={0,""};
 
-static std::vector<std::string> CsvRow(const std::string& line){
+static std::vector<std::string> CsvRow(std::string_view line){
     std::vector<std::string> fields;std::string cell;bool quoted=false;
     for(size_t i=0;i<line.size();++i){char c=line[i];
         if(c=='"'){if(quoted&&i+1<line.size()&&line[i+1]=='"'){cell+='"';++i;}else quoted=!quoted;}
         else if(c==','&&!quoted){fields.push_back(cell);cell.clear();}else if(c!='\r')cell+=c;
     }fields.push_back(cell);return fields;
+}
+// Keep only the five columns the overlay uses, including quoted CSV cells.
+static bool ReadFrameColumns(std::string_view line,const int (&wanted)[5],std::string (&values)[5]){
+    const int last=*std::max_element(wanted,wanted+5);
+    std::string* output=nullptr;
+    auto select=[&](int column){
+        output=nullptr;
+        for(size_t i=0;i<5;++i)if(wanted[i]==column){output=&values[i];break;}
+    };
+    for(auto& value:values)value.clear();
+    int column=0;
+    bool quoted=false;
+    select(column);
+    for(size_t i=0;i<line.size();++i){
+        char c=line[i];
+        if(c=='"'){
+            if(quoted&&i+1<line.size()&&line[i+1]=='"'){
+                if(output)*output+='"';
+                ++i;
+            }else quoted=!quoted;
+        }else if(c==','&&!quoted){
+            if(column==last)return true;
+            select(++column);
+        }else if(output&&c!='\r')*output+=c;
+    }
+    return column>=last&&!quoted;
 }
 static std::wstring ProcessName(DWORD pid){
     HANDLE p=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,FALSE,pid);wchar_t text[MAX_PATH]=L"";DWORD n=MAX_PATH;
@@ -156,24 +183,25 @@ static void ReadRawPresent(const std::string& line){
     auto& stream=streams[key];stream.name=name;stream.runtime=event==1?L"D3D9":L"DXGI";
     StoreFrame(key,stream,1000.0*delta/frequency);
 }
-static void ParseFrameLine(const std::string& line){
-    auto fields=CsvRow(line);
-    if(pidColumn<0){for(size_t i=0;i<fields.size();++i){
+static void ParseFrameLine(std::string_view line){
+    if(pidColumn<0){auto fields=CsvRow(line);for(size_t i=0;i<fields.size();++i){
         if(!_stricmp(fields[i].c_str(),"ProcessID"))pidColumn=(int)i;
         if(!_stricmp(fields[i].c_str(),"msBetweenPresents"))msColumn=(int)i;
         if(!_stricmp(fields[i].c_str(),"Application"))appColumn=(int)i;
         if(!_stricmp(fields[i].c_str(),"Runtime"))runtimeColumn=(int)i;
         if(!_stricmp(fields[i].c_str(),"SwapChainAddress"))chainColumn=(int)i;
     }if(pidColumn>=0&&msColumn>=0)Log(L"PresentMon schema verified: ProcessID, msBetweenPresents, SwapChainAddress.");return;}
-    int required=std::max(std::max(pidColumn,msColumn),std::max(std::max(appColumn,chainColumn),runtimeColumn));
-    if(msColumn<0||(int)fields.size()<=required)return;
-    DWORD pid=strtoul(fields[pidColumn].c_str(),NULL,10);if(!pid||pid==GetCurrentProcessId())return;
-    double ms=strtod(fields[msColumn].c_str(),NULL);if(!(ms>0&&ms<10000&&isfinite(ms)))return;
-    FrameKey key={pid,chainColumn>=0?fields[chainColumn]:""};
+    if(msColumn<0)return;
+    const int columns[]={pidColumn,msColumn,appColumn,chainColumn,runtimeColumn};
+    static std::string fields[5];
+    if(!ReadFrameColumns(line,columns,fields))return;
+    DWORD pid=strtoul(fields[0].c_str(),NULL,10);if(!pid||pid==GetCurrentProcessId())return;
+    double ms=strtod(fields[1].c_str(),NULL);if(!(ms>0&&ms<10000&&isfinite(ms)))return;
+    FrameKey key={pid,fields[3]};
     if(streams.size()>=128&&streams.find(key)==streams.end())return;
     auto& stream=streams[key];
-    if(runtimeColumn>=0)stream.runtime=Wide(fields[runtimeColumn].c_str(),fields[runtimeColumn].size());
-    if(stream.name.empty()){stream.name=appColumn>=0?Wide(fields[appColumn].c_str(),fields[appColumn].size()):L"";
+    if(runtimeColumn>=0)stream.runtime=fields[4]=="DXGI"?L"DXGI":fields[4]=="D3D9"?L"D3D9":L"";
+    if(stream.name.empty()){stream.name=Wide(fields[2].c_str(),fields[2].size());
         if(stream.name.empty()||stream.name==L"<unknown>")stream.name=ProcessName(pid);
         size_t slash=stream.name.find_last_of(L"\\/");if(slash!=std::wstring::npos)stream.name.erase(0,slash+1);
         if(stream.name.empty())stream.name=L"PID "+std::to_wstring(pid);
@@ -187,7 +215,7 @@ static void ReadFrames(){
     for(int n=0;n<64&&PeekNamedPipe(fpsPipe,NULL,0,NULL,&available,NULL)&&available;++n){
         DWORD got=0;if(!ReadFile(fpsPipe,buffer,std::min<DWORD>(available,sizeof(buffer)),&got,NULL)||!got)break;
         csvPending.append(buffer,got);size_t end,start=0;
-        while((end=csvPending.find('\n',start))!=std::string::npos){ParseFrameLine(csvPending.substr(start,end-start));start=end+1;}
+        while((end=csvPending.find('\n',start))!=std::string::npos){ParseFrameLine(std::string_view(csvPending).substr(start,end-start));start=end+1;}
         if(start)csvPending.erase(0,start);
         if(csvPending.size()>65536)csvPending.clear();
     }
