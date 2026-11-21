@@ -56,9 +56,8 @@ PASS foreground_unsupported_handoff_restores_desktop
 PASS foreground_unmatched_full_path_restores_original
 PASS delta_rule_save
 PASS delta_rule_channel_persists_separately_from_exe
-PASS delta_rule_takes_priority
-PASS delta_rule_stays_active_when_unfocused
-PASS delta_rule_restores_on_game_exit
+PASS path_rule_starts_in_background
+PASS path_rule_restores_on_game_exit
 PASS foreground_more_than_24_rules_save
 PASS foreground_large_rule_file_round_trip
 PASS foreground_empty_rule_file_save
@@ -92,7 +91,7 @@ PASS single_exe_extracts_verified_capture_runtime
 PASS existing_capture_runtime_verified_and_reused
 PASS replay_real_delta_force_capture_rows
 PASS real_delta_force_capture_fps_regression
-BENCH percentile_2000_iterations full_sort_ms=90.816 partial_selection_ms=18.097 speed_ratio=5.018
+BENCH percentile_2000_iterations full_sort_ms=88.569 partial_selection_ms=18.750 speed_ratio=4.724
 PASS silver_wolf_tray_icon_resource_loads
 PASS two_sections_created_in_same_window
 PASS preblurred_background_loaded_at_fixed_size
@@ -101,8 +100,8 @@ PASS background_toggle_off_releases_bitmap_and_saves_setting
 PASS background_toggle_on_reloads_bitmap
 PASS resolution_tab_hides_monitor_controls
 PASS rule_table_test_starts_empty
-PASS rule_table_create_delta_steam
-PASS rule_table_virtual_channel_cell
+PASS rule_table_create_game_exe_path
+PASS rule_table_virtual_path_cell
 PASS rule_table_update_selected_row
 PASS rule_table_delete_selected_row
 PASS settings_fonts_scale_up_with_window
@@ -113,4 +112,4 @@ PASS fullscreen_exit_restores_window
 PASS closing_settings_releases_fonts
 PASS closing_settings_releases_artwork_and_icons
 PASS repeated_settings_open_close_does_not_accumulate_gdi_objects
-SUMMARY passed=112 failed=0
+SUMMARY passed=111 failed=0

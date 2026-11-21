@@ -3,7 +3,6 @@ namespace resolutionui {
 static std::wstring lastStatus;
 static bool visible=false;
 static HWND Item(int id){return GetDlgItem(picker,id);}
-static const wchar_t* channels[]={L"Steam",L"官方启动器",L"WeGame"};
 static int editedRule=-1, tableAutoWidth=0, tableAutoHeight=0;
 static bool updatingTable=false;
 static std::vector<resolution::MonitorChoice> displayChoices;
@@ -110,8 +109,6 @@ static void LoadRule(){
     editedRule=SelectedRule();
     if(editedRule<0||(size_t)editedRule>=resolution::foregroundRules.size())return;
     const auto& rule=resolution::foregroundRules[editedRule];
-    SendMessageW(Item(125),CB_SETCURSEL,rule.platform<3?0:1,0);
-    SendMessageW(Item(128),CB_SETCURSEL,rule.platform<3?rule.platform:0,0);
     SetWindowTextW(Item(104),rule.path.c_str());
     SendMessageW(Item(106),BM_SETCHECK,rule.automatic,0);
     SendMessageW(Item(107),BM_SETCHECK,!rule.automatic,0);
@@ -125,10 +122,10 @@ static bool Notify(NMHDR* header){
         auto& item=reinterpret_cast<NMLVDISPINFOW*>(header)->item;
         if(!(item.mask&LVIF_TEXT)||item.cchTextMax<=0||item.iItem<0||(size_t)item.iItem>=resolution::foregroundRules.size())return true;
         const auto& rule=resolution::foregroundRules[item.iItem];
-        const bool delta=rule.platform<3;
+
         std::wstring text;
         switch(item.iSubItem){
-        case 0:text=delta?L"三角洲":L"其他程序";break;
+        case 0:text=rule.path.empty()?L"旧规则 · 待补 EXE":rule.path;break;
         case 1:case 2:{
             int width=rule.width,height=rule.height;
             if(rule.automatic){
@@ -137,9 +134,9 @@ static bool Notify(NMHDR* header){
             }else text=std::to_wstring(item.iSubItem==1?width:height);
             break;}
         case 3:text=rule.refreshHz?std::to_wstring(rule.refreshHz)+L" Hz":L"保持";break;
-        case 4:if(delta)text=channels[rule.platform];break;
-        case 5:if(!delta)text=rule.path;break;
-        case 6:
+
+
+        case 4:
             text=rule.monitor.empty()?L"默认主显示器":L"已保存的显示器（未连接）";
             for(const auto& monitor:displayChoices)if(monitor.id==rule.monitor){text=monitor.label;break;}
             break;
@@ -157,13 +154,11 @@ static bool Notify(NMHDR* header){
     return false;
 }
 static void EnableInputs(){
-    const bool custom=SendMessageW(Item(125),CB_GETCURSEL,0,0)==1;
     EnableWindow(Item(122),!resolution::foregroundRules.empty());
     EnableWindow(Item(124),SelectedRule()>=0);
-    EnableWindow(Item(128),!custom);
     SetWindowTextW(Item(127),editedRule>=0?L"保存修改":L"保存新规则");
     SetWindowTextW(Item(118),L"选中表格行进行修改，或点「新建规则」。");
-    EnableWindow(Item(104),custom);EnableWindow(Item(105),custom);
+    EnableWindow(Item(104),TRUE);EnableWindow(Item(105),TRUE);
     bool automatic=SendMessageW(Item(106),BM_GETCHECK,0,0)==BST_CHECKED;
     EnableWindow(Item(108),!automatic);EnableWindow(Item(110),!automatic);
 }
@@ -191,16 +186,13 @@ static void Create(HWND h){
     add(L"BUTTON",L"恢复并暂停",114,BS_OWNERDRAW|WS_TABSTOP);add(L"BUTTON",L"保存设置",115,BS_OWNERDRAW|WS_TABSTOP);
     add(L"STATIC",L"",116);add(L"STATIC",L"",117);
     add(L"STATIC",L"仅切换主显示器。先检查模式，再启用；试用会自动恢复。\n修改监听目标会在本次目标退出后生效。\n无法确认进程完整路径时保持当前模式，避免提前恢复。",118);
-    HWND kind=add(L"COMBOBOX",L"",125,CBS_DROPDOWNLIST|WS_VSCROLL|WS_TABSTOP);
-    for(auto name:{L"三角洲",L"其他程序"})SendMessageW(kind,CB_ADDSTRING,0,(LPARAM)name);
-    SendMessageW(kind,CB_SETCURSEL,0,0);
     INITCOMMONCONTROLSEX controls={sizeof(controls),ICC_LISTVIEW_CLASSES};
     InitCommonControlsEx(&controls);
     HWND table=add(WC_LISTVIEWW,L"",122,LVS_REPORT|LVS_OWNERDATA|LVS_SINGLESEL|LVS_SHOWSELALWAYS|WS_BORDER|WS_TABSTOP);
     SendMessageW(table,CCM_SETUNICODEFORMAT,TRUE,0);
     SendMessageW(table,LVM_SETEXTENDEDLISTVIEWSTYLE,0,LVS_EX_FULLROWSELECT|LVS_EX_GRIDLINES);
     int column=0;
-    for(auto title:{L"类型",L"宽",L"高",L"刷新率",L"启动渠道",L"目标 EXE 路径",L"显示器"}){
+    for(auto title:{L"游戏本体 EXE 路径",L"宽",L"高",L"刷新率",L"显示器"}){
         LVCOLUMNW info={};info.mask=LVCF_TEXT|LVCF_WIDTH;info.pszText=const_cast<wchar_t*>(title);info.cx=100;
         SendMessageW(table,LVM_INSERTCOLUMNW,column++,(LPARAM)&info);
     }
@@ -208,9 +200,6 @@ static void Create(HWND h){
     add(L"COMBOBOX",L"",130,CBS_DROPDOWNLIST|WS_VSCROLL|WS_TABSTOP);
     add(L"EDIT",L"",131,WS_BORDER|ES_NUMBER|WS_TABSTOP);
     SendMessageW(Item(131),EM_SETLIMITTEXT,4,0);
-    HWND channel=add(L"COMBOBOX",L"",128,CBS_DROPDOWNLIST|WS_TABSTOP);
-    for(auto name:channels)SendMessageW(channel,CB_ADDSTRING,0,(LPARAM)name);
-    SendMessageW(channel,CB_SETCURSEL,0,0);
     add(L"BUTTON",L"新建规则",123,BS_OWNERDRAW|WS_TABSTOP);
     add(L"BUTTON",L"保存新规则",127,BS_OWNERDRAW|WS_TABSTOP);
     add(L"BUTTON",L"删除所选",124,BS_OWNERDRAW|WS_TABSTOP);
@@ -222,7 +211,7 @@ static void Layout(HWND h,double scale,int width,int height){
     auto s=[&](int v){return (int)lround(v*scale);};
     auto place=[&](int id,int x,int y,int w,int ht){MoveWindow(GetDlgItem(h,id),s(x),s(y+40),w<0?width-s(x)-s(22):s(w),s(ht),FALSE);};
     place(121,22,10,-1,25);place(100,22,48,-1,28);
-    place(125,22,86,150,130);place(128,182,86,165,130);
+
     place(103,22,133,100,24);place(104,145,129,-1,28);
     MoveWindow(GetDlgItem(h,104),s(145),s(169),width-s(145+22+100),s(28),FALSE);
     MoveWindow(GetDlgItem(h,105),width-s(112),s(169),s(90),s(28),FALSE);
@@ -230,10 +219,10 @@ static void Layout(HWND h,double scale,int width,int height){
     place(108,194,212,110,28);place(109,314,214,22,26);place(110,346,212,110,28);place(129,464,212,154,165);place(131,624,212,65,28);
     place(111,22,251,-1,28);
     place(122,22,291,-1,115);
-    const int widths[]={92,60,60,84,115};
+    const int widths[]={60,60,84,150};
     int used=0;
-    for(int i=0;i<5;++i){const int w=s(widths[i]);used+=w;SendMessageW(Item(122),LVM_SETCOLUMNWIDTH,i,w);}
-    SendMessageW(Item(122),LVM_SETCOLUMNWIDTH,5,std::max(s(140),width-s(213)-used));SendMessageW(Item(122),LVM_SETCOLUMNWIDTH,6,s(150));
+    for(int i=0;i<4;++i){const int w=s(widths[i]);used+=w;SendMessageW(Item(122),LVM_SETCOLUMNWIDTH,i+1,w);}
+    SendMessageW(Item(122),LVM_SETCOLUMNWIDTH,0,std::max(s(160),width-s(64)-used));
     place(123,22,413,105,28);place(127,137,413,112,28);place(124,259,413,105,28);place(126,374,413,152,28);
     place(112,22,449,110,28);place(113,142,449,116,28);place(114,268,449,126,28);
     place(117,402,449,-1,27);place(116,22,482,-1,26);place(118,22,510,-1,24);
@@ -296,7 +285,7 @@ static void ShowEnabledRules(){
     resolution::SavedMode baseline;
     const bool haveBaseline=resolution::LoadRecovery(baseline)||resolution::Current(baseline);
     auto describe=[&](const resolution::Config& rule){
-        std::wstring name=rule.platform<3?std::wstring(L"三角洲 · ")+channels[rule.platform]:
+        std::wstring name=
             rule.path.substr(rule.path.find_last_of(L"\\/")+1);
         int width=rule.width,height=rule.height;
         if(rule.automatic&&(!haveBaseline||!resolution::Calculate4x3(baseline.mode.dmPelsHeight,width,height)))
@@ -305,7 +294,7 @@ static void ShowEnabledRules(){
     };
     std::wstring message;
     if(config.platform==4){
-        for(const auto& rule:resolution::foregroundRules)message+=describe(rule)+L"\n";
+        for(const auto& rule:resolution::foregroundRules)if(!rule.path.empty())message+=describe(rule)+L"\n";
         if(message.empty())message=L"多应用监听已启用，但没有添加规则。";
     }else{
         message=L"当前使用单应用监听：\n"+describe(config)+L"\n\n多应用列表尚未启用。";
@@ -325,17 +314,14 @@ static bool Command(int id){
         return true;
     }
     if(id==130||id==108||id==110){RefreshRates(ReadRefreshRate());CurrentMode();return true;}
-    if(id==125||id==128){EnableInputs();return true;}
     if(id==123){
         editedRule=-1;
         LVITEMW state={};state.stateMask=LVIS_SELECTED|LVIS_FOCUSED;
         SendMessageW(Item(122),LVM_SETITEMSTATE,(WPARAM)-1,(LPARAM)&state);
-        SendMessageW(Item(125),CB_SETCURSEL,0,0);
-        SendMessageW(Item(128),CB_SETCURSEL,0,0);
         SetWindowTextW(Item(104),L"");SelectMonitor(L"");RefreshRates(0);
         SendMessageW(Item(106),BM_SETCHECK,BST_UNCHECKED,0);
         SendMessageW(Item(107),BM_SETCHECK,BST_CHECKED,0);
-        EnableInputs();SetFocus(Item(125));return true;
+        EnableInputs();SetFocus(Item(104));return true;
     }
     if(id==124||id==127){
         auto rules=resolution::foregroundRules;
@@ -347,14 +333,12 @@ static bool Command(int id){
             if(!rules.empty())selection=std::min(selected,(int)rules.size()-1);
         }else{
             resolution::Config rule;
-            const bool delta=SendMessageW(Item(125),CB_GETCURSEL,0,0)==0;
-            if(!Read(rule,!delta)||rule.platform!=4)return true;
-            if(delta){rule.platform=(int)SendMessageW(Item(128),CB_GETCURSEL,0,0);rule.path.clear();}
+            if(!Read(rule,true))return true;
             for(size_t i=0;i<rules.size();++i){
                 if((int)i==editedRule)continue;
                 const auto& item=rules[i];
-                if((delta&&item.platform<3)||(!delta&&item.platform==4&&!_wcsicmp(rule.path.c_str(),item.path.c_str()))){
-                    MessageBoxW(picker,delta?L"已有三角洲规则，请选中该行修改。":L"这个 EXE 已有规则，请选中该行修改。",L"分辨率规则",MB_ICONWARNING);return true;
+                if(!_wcsicmp(rule.path.c_str(),item.path.c_str())){
+                    MessageBoxW(picker,L"这个 EXE 已有规则，请选中该行修改。",L"分辨率规则",MB_ICONWARNING);return true;
                 }
             }
             if(editedRule>=0&&(size_t)editedRule<rules.size()){selection=editedRule;rules[selection]=rule;}

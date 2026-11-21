@@ -6,7 +6,7 @@
 
 ## 下载
 
-前往 [Releases](https://github.com/Drinkwater10086/aeropanel/releases/latest)，下载 `AeroPanel-v3.0.9-win-x64.zip`，解压到可写目录并运行 `AeroPanel.exe`。请保留 ZIP 中的 runtime 目录。发行包适用于 Windows x64。
+前往 [Releases](https://github.com/Drinkwater10086/aeropanel/releases/latest)，下载 `AeroPanel-v3.0.10-win-x64.zip`，解压到可写目录并运行 `AeroPanel.exe`。请保留 ZIP 中的 runtime 目录。发行包适用于 Windows x64。
 
 ## 两个板块
 

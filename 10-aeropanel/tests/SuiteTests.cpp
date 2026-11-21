@@ -114,12 +114,19 @@ static resolution::Presence fakeDeltaGame=resolution::Presence::Absent;
 static bool FakeDeltaScan(const resolution::Config&,resolution::Presence& game,resolution::Presence& launcher){
     game=fakeDeltaGame;launcher=resolution::Presence::Absent;return true;
 }
+static std::wstring fakeBackgroundPath;
+static bool FakeRuleProcesses(std::vector<resolution::ProcessInfo>& entries,DWORD& ownSession){
+    ownSession=1;
+    for(const auto& path:{fakeForegroundPath,fakeBackgroundPath})
+        if(!path.empty())entries.push_back({path.substr(path.find_last_of(L"\\/")+1),path,1,true});
+    return true;
+}
 static void ForegroundRuleTests(){
     using namespace resolution;
     auto savedConfig=config;
     auto savedRules=foregroundRules;
     ResetFake();
-    foregroundExecutable=FakeForeground;
+    foregroundExecutable=FakeForeground;scanRuleProcesses=FakeRuleProcesses;
     Config a;a.platform=4;a.enabled=true;a.path=L"C:\\甲\\app.exe";
     Config b=a;b.path=L"C:\\乙\\app.exe";b.automatic=false;b.width=1920;b.height=1080;
     Check(SaveForegroundRules({a,b}),"foreground_rules_save");
@@ -129,10 +136,10 @@ static void ForegroundRuleTests(){
     config=a;
     fakeForegroundPath=a.path;Tick();
     Check(policy.active&&fakeMode.mode.dmPelsWidth==2880,"foreground_first_rule_applies");
-    fakeDeltaGame=Presence::Present;scanProcesses=FakeDeltaScan;
+    fakeBackgroundPath=a.path;
     fakeForegroundPath=b.path;nextPoll=0;Tick();
     Check(policy.active&&fakeMode.mode.dmPelsWidth==2880,"foreground_background_process_retains_game_resolution");
-    fakeDeltaGame=Presence::Absent;scanProcesses=Scan;
+    fakeBackgroundPath.clear();
     fakeForegroundPath=b.path;nextPoll=0;Tick();
     Check(policy.active&&fakeMode.mode.dmPelsWidth==1920,"foreground_second_rule_applies");
     SavedMode baseline;
@@ -154,15 +161,10 @@ static void ForegroundRuleTests(){
     ReadForegroundRules();
     Check(foregroundRules.size()==3&&foregroundRules.back().platform==2&&foregroundRules.back().path.empty(),
         "delta_rule_channel_persists_separately_from_exe");
-    scanProcesses=FakeDeltaScan;
-    fakeDeltaGame=Presence::Present;
-    fakeForegroundPath=b.path;nextPoll=nextDeltaScan=0;Tick();
-    Check(policy.active&&session.platform==2&&fakeMode.mode.dmPelsWidth==2880,"delta_rule_takes_priority");
-    fakeForegroundPath.clear();nextPoll=0;Tick();
-    Check(policy.active&&fakeMode.mode.dmPelsWidth==2880,"delta_rule_stays_active_when_unfocused");
-    fakeDeltaGame=Presence::Absent;nextPoll=0;Tick();
-    Check(!policy.active&&fakeMode.mode.dmPelsWidth==3840,"delta_rule_restores_on_game_exit");
-    scanProcesses=Scan;
+    fakeForegroundPath.clear();fakeBackgroundPath=b.path;nextPoll=0;Tick();
+    Check(policy.active&&session.path==b.path&&fakeMode.mode.dmPelsWidth==1920,"path_rule_starts_in_background");
+    fakeBackgroundPath.clear();nextPoll=0;Tick();
+    Check(!policy.active&&fakeMode.mode.dmPelsWidth==3840,"path_rule_restores_on_game_exit");
     std::vector<Config> largeRules;
     for(int i=0;i<200;++i){
         Config rule=b;
@@ -176,7 +178,7 @@ static void ForegroundRuleTests(){
     Check(SaveForegroundRules({}),"foreground_empty_rule_file_save");
     ReadForegroundRules();
     Check(foregroundRules.empty(),"foreground_empty_file_stays_empty");
-    foregroundExecutable=ForegroundExecutable;
+    foregroundExecutable=ForegroundExecutable;scanRuleProcesses=ScanRuleProcesses;
     config=savedConfig;
     SaveForegroundRules(savedRules);
     display={};
@@ -292,18 +294,20 @@ static void UiTests(){
     Check(resolution::SaveForegroundRules({}),"rule_table_test_starts_empty");
     resolutionui::RefreshRules();
     SendMessageW(picker,WM_COMMAND,123,0);
+    const std::wstring target=std::wstring(folder)+L"\\ApiProbe.exe";
+    SetDlgItemTextW(picker,104,target.c_str());
     SetDlgItemInt(picker,108,1280,FALSE);SetDlgItemInt(picker,110,960,FALSE);
-    SendMessageW(picker,WM_COMMAND,127,0);
     resolutionui::SelectMonitor(L"test-monitor-id");
     resolutionui::SelectRefreshRate(144);SendMessageW(picker,WM_COMMAND,127,0);
     resolution::ReadForegroundRules();
     HWND table=GetDlgItem(picker,122);
     Check(SendMessageW(table,LVM_GETITEMCOUNT,0,0)==1&&resolution::foregroundRules.size()==1&&
         resolution::foregroundRules[0].width==1280&&resolution::foregroundRules[0].height==960&&
-        resolution::foregroundRules[0].platform==0&&resolution::foregroundRules[0].refreshHz==144&&resolution::foregroundRules[0].monitor==L"test-monitor-id","rule_table_create_delta_steam");
-    wchar_t cell[48]={};LVITEMW item={};item.iSubItem=4;item.pszText=cell;item.cchTextMax=48;
+        resolution::foregroundRules[0].path==target&&resolution::foregroundRules[0].refreshHz==144&&
+        resolution::foregroundRules[0].monitor==L"test-monitor-id","rule_table_create_game_exe_path");
+    wchar_t cell[1024]={};LVITEMW item={};item.iSubItem=0;item.pszText=cell;item.cchTextMax=1024;
     SendMessageW(table,LVM_GETITEMTEXTW,0,(LPARAM)&item);
-    Check(!wcscmp(cell,L"Steam"),"rule_table_virtual_channel_cell");
+    Check(target==cell,"rule_table_virtual_path_cell");
     SetDlgItemInt(picker,108,1600,FALSE);SendMessageW(picker,WM_COMMAND,127,0);
     Check(resolution::foregroundRules.size()==1&&resolution::foregroundRules[0].width==1600,
         "rule_table_update_selected_row");
