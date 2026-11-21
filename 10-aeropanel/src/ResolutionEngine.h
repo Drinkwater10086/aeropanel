@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #include <tlhelp32.h>
 #include <commdlg.h>
 #include <shlobj.h>
@@ -6,7 +6,7 @@
 #include <io.h>
 #include "ResolutionPolicy.h"
 namespace resolution {
-struct Config {bool enabled=false,automatic=true,startup=false;int platform=2,width=2880,height=2160;std::wstring path;};
+struct Config {bool enabled=false,automatic=true,startup=false;int platform=2,width=2880,height=2160,refreshHz=0;std::wstring path,monitor;};
 struct SavedMode {DWORD magic=0x44535532,version=1;wchar_t device[32]={};DEVMODEW mode={};};
 static Config config,session;
 static Policy policy;
@@ -26,6 +26,19 @@ static void ParseForegroundRule(const wchar_t* text,std::vector<Config>& rules){
     if(swscanf(text,L"%u,%u,%u,%n",&width,&height,&automatic,&end)!=3||
        end<=0||!text[end]||width<320||width>16384||height<200||height>16384||automatic>1)return;
     Config rule;rule.platform=4;rule.enabled=true;rule.path=text+end;
+    if(rule.path.rfind(L"@monitor:",0)==0){
+        const auto end=rule.path.find(L',',9);
+        if(end==std::wstring::npos||end==9||end+1==rule.path.size())return;
+        rule.monitor=rule.path.substr(9,end-9);
+        rule.path.erase(0,end+1);
+    }
+    if(rule.path.rfind(L"@hz:",0)==0){
+        wchar_t* end=nullptr;
+        unsigned long hz=wcstoul(rule.path.c_str()+4,&end,10);
+        if(end==rule.path.c_str()+4||*end!=L','||!end[1]||hz<20||hz>1000)return;
+        rule.refreshHz=(int)hz;
+        rule.path=std::wstring(end+1);
+    }
     if(rule.path.size()==8&&rule.path.rfind(L"@delta:",0)==0&&rule.path[7]>=L'0'&&rule.path[7]<=L'2'){
         rule.platform=rule.path[7]-L'0';
         rule.path.clear();
@@ -74,7 +87,7 @@ static bool SaveForegroundRules(const std::vector<Config>& rules){
     for(const auto& rule:rules){
         const auto target=rule.platform<3?L"@delta:"+std::to_wstring(rule.platform):rule.path;
         const auto line=std::to_wstring(rule.width)+L","+std::to_wstring(rule.height)+L","+
-            std::to_wstring(rule.automatic)+L","+target+L"\n";
+            std::to_wstring(rule.automatic)+L","+(rule.monitor.empty()?L"":L"@monitor:"+rule.monitor+L",")+(rule.refreshHz?L"@hz:"+std::to_wstring(rule.refreshHz)+L",":L"")+target+L"\n";
         if(fwrite(line.data(),sizeof(wchar_t),line.size(),file)!=line.size()){ok=false;break;}
     }
     if(fflush(file)||_commit(_fileno(file)))ok=false;
@@ -91,28 +104,59 @@ static const Config* MatchForegroundRule(const std::wstring& path){
     return nullptr;
 }
 static std::wstring ForegroundExecutable(){
-    DWORD pid=0;
-    GetWindowThreadProcessId(GetForegroundWindow(),&pid);
+    static HWND previousWindow=nullptr;
+    static DWORD previousPid=0;
+    static ULONGLONG checkedAt=0;
+    static std::wstring cachedPath;
+    const HWND window=GetForegroundWindow();
+    DWORD pid=0;GetWindowThreadProcessId(window,&pid);
     if(!pid||pid==GetCurrentProcessId())return L"";
+    const auto now=GetTickCount64();
+    if(window==previousWindow&&pid==previousPid&&now-checkedAt<2000)return cachedPath;
+    previousWindow=window;previousPid=pid;checkedAt=now;cachedPath.clear();
     HANDLE process=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,FALSE,pid);
     if(!process)return L"";
     wchar_t path[1024];DWORD size=1024;
-    bool ok=QueryFullProcessImageNameW(process,0,path,&size)!=FALSE;
+    if(QueryFullProcessImageNameW(process,0,path,&size))cachedPath.assign(path,size);
     CloseHandle(process);
-    return ok?std::wstring(path,size):L"";
+    return cachedPath;
 }
 static void Fields(DEVMODEW& m){m.dmSize=sizeof(m);m.dmDriverExtra=0;m.dmFields=DM_BITSPERPEL|DM_PELSWIDTH|DM_PELSHEIGHT|DM_DISPLAYFLAGS|DM_DISPLAYFREQUENCY;}
 static bool Exists(const std::wstring& p){return GetFileAttributesW(p.c_str())!=INVALID_FILE_ATTRIBUTES;}
 static void Note(const std::wstring& text){status=text;Log((L"Resolution: "+text).c_str());}
-static bool Current(SavedMode& saved){
-    DISPLAY_DEVICEW d={};d.cb=sizeof(d);
-    for(DWORD i=0;EnumDisplayDevicesW(NULL,i,&d,0);++i){
-        if(d.StateFlags&DISPLAY_DEVICE_PRIMARY_DEVICE){wcsncpy(saved.device,d.DeviceName,31);saved.device[31]=0;break;}
-        d={};d.cb=sizeof(d);
+struct MonitorChoice {std::wstring id,device,label;};
+static std::vector<MonitorChoice> Monitors(){
+    std::vector<MonitorChoice> result;
+    for(DWORD i=0;;++i){
+        DISPLAY_DEVICEW adapter={};adapter.cb=sizeof(adapter);
+        if(!EnumDisplayDevicesW(NULL,i,&adapter,0))break;
+        if(!(adapter.StateFlags&DISPLAY_DEVICE_ATTACHED_TO_DESKTOP))continue;
+        DISPLAY_DEVICEW monitor={};monitor.cb=sizeof(monitor);
+        for(DWORD j=0;EnumDisplayDevicesW(adapter.DeviceName,j,&monitor,EDD_GET_DEVICE_INTERFACE_NAME);++j){
+            if((monitor.StateFlags&DISPLAY_DEVICE_ACTIVE)&&monitor.DeviceID[0]){
+                std::wstring label=monitor.DeviceString;
+                label+=L" ("+std::wstring(adapter.DeviceName+4)+L")";
+                if(adapter.StateFlags&DISPLAY_DEVICE_PRIMARY_DEVICE)label+=L" · 主屏";
+                result.push_back({monitor.DeviceID,adapter.DeviceName,std::move(label)});
+                break;
+            }
+            monitor={};monitor.cb=sizeof(monitor);
+        }
     }
-    if(!saved.device[0])return false;
-    saved.mode={};saved.mode.dmSize=sizeof(saved.mode);
+    return result;
+}
+static bool CurrentDevice(const wchar_t* device,SavedMode& saved){
+    if(!device||!*device||wcslen(device)>=32)return false;
+    saved={};wcscpy(saved.device,device);
+    saved.mode.dmSize=sizeof(saved.mode);
     return EnumDisplaySettingsExW(saved.device,ENUM_CURRENT_SETTINGS,&saved.mode,0)!=FALSE;
+}
+static bool Current(SavedMode& saved){
+    for(DWORD i=0;;++i){
+        DISPLAY_DEVICEW adapter={};adapter.cb=sizeof(adapter);
+        if(!EnumDisplayDevicesW(NULL,i,&adapter,0))return false;
+        if(adapter.StateFlags&DISPLAY_DEVICE_PRIMARY_DEVICE)return CurrentDevice(adapter.DeviceName,saved);
+    }
 }
 struct DisplayBackend {
     bool (*current)(SavedMode&)=Current;
@@ -120,6 +164,12 @@ struct DisplayBackend {
     decltype(&ChangeDisplaySettingsExW) change=ChangeDisplaySettingsExW;
 };
 static DisplayBackend display;
+static bool CurrentFor(const Config& cfg,SavedMode& saved){
+    if(cfg.monitor.empty())return display.current(saved);
+    for(const auto& monitor:Monitors())
+        if(!_wcsicmp(cfg.monitor.c_str(),monitor.id.c_str()))return CurrentDevice(monitor.device.c_str(),saved);
+    return false;
+}
 static bool LoadRecovery(SavedMode& saved){
     FILE* f=_wfopen(recoveryFile.c_str(),L"rb");if(!f)return false;
     bool ok=fread(&saved,1,sizeof(saved),f)==sizeof(saved)&&fgetc(f)==EOF;fclose(f);
@@ -140,7 +190,9 @@ static void ReadConfig(){
     config.platform=Clamp(GetPrivateProfileIntW(L"Resolution",L"Platform",2,iniPath),0,4);
     config.width=GetPrivateProfileIntW(L"Resolution",L"Width",2880,iniPath);
     config.height=GetPrivateProfileIntW(L"Resolution",L"Height",2160,iniPath);
-    wchar_t path[1024];GetPrivateProfileStringW(L"Resolution",L"Program",L"",path,1024,iniPath);config.path=path;
+    config.refreshHz=GetPrivateProfileIntW(L"Resolution",L"RefreshHz",0,iniPath);
+    if(config.refreshHz<20||config.refreshHz>1000)config.refreshHz=0;
+    wchar_t path[1024];GetPrivateProfileStringW(L"Resolution",L"Program",L"",path,1024,iniPath);config.path=path;GetPrivateProfileStringW(L"Resolution",L"Monitor",L"",path,1024,iniPath);config.monitor=path;
 }
 static std::wstring StartupPath(){if(!startupOverride.empty())return startupOverride;wchar_t p[MAX_PATH];if(FAILED(SHGetFolderPathW(NULL,CSIDL_STARTUP,NULL,SHGFP_TYPE_CURRENT,p)))return L"";return std::wstring(p)+L"\\AeroPanel.lnk";}
 static bool SetStartup(bool enabled){
@@ -160,8 +212,8 @@ static bool SetStartup(bool enabled){
 static bool SaveConfig(const Config& value){
     if(value.platform<0||value.platform>4||value.width<320||value.width>16384||value.height<200||value.height>16384)return false;
     auto put=[&](const wchar_t* k,const std::wstring& v){return WritePrivateProfileStringW(L"Resolution",k,v.c_str(),iniPath)!=FALSE;};
-    if(!put(L"Program",value.path)||!put(L"Platform",std::to_wstring(value.platform))||
-        !put(L"Auto4x3",std::to_wstring(value.automatic))||!put(L"Width",std::to_wstring(value.width))||
+    if(!put(L"Monitor",value.monitor)||!put(L"Program",value.path)||!put(L"Platform",std::to_wstring(value.platform))||
+        !put(L"RefreshHz",std::to_wstring(value.refreshHz))||!put(L"Auto4x3",std::to_wstring(value.automatic))||!put(L"Width",std::to_wstring(value.width))||
         !put(L"Height",std::to_wstring(value.height)))return false;
     if((value.startup||Exists(StartupPath()))&&!SetStartup(value.startup))return false;
     if(!put(L"Enabled",std::to_wstring(value.enabled)))return false;
@@ -177,17 +229,18 @@ static bool Calculate4x3(DWORD desktopHeight,int& width,int& height){
 static bool FindMode(const Config& cfg,SavedMode& before,DEVMODEW& target,LONG& code,const SavedMode* baseline=nullptr){
     code=DISP_CHANGE_BADMODE;
     if(baseline)before=*baseline;
-    else if(!display.current(before)){code=DISP_CHANGE_FAILED;return false;}
+    else if(!CurrentFor(cfg,before)){code=DISP_CHANGE_FAILED;return false;}
     int width=cfg.width,height=cfg.height;
     if(cfg.automatic&&!Calculate4x3(before.mode.dmPelsHeight,width,height)){code=-100;return false;}
     if(width<320||width>16384||height<200||height>16384){code=-101;return false;}
     bool found=false;long diff=LONG_MAX;DEVMODEW mode={};
     for(DWORD i=0;;++i){mode={};mode.dmSize=sizeof(mode);if(!display.enumerate(before.device,i,&mode,0))break;
         if(mode.dmPelsWidth!=(DWORD)width||mode.dmPelsHeight!=(DWORD)height||mode.dmBitsPerPel!=before.mode.dmBitsPerPel)continue;
+        if(cfg.refreshHz&&mode.dmDisplayFrequency!=(DWORD)cfg.refreshHz)continue;
         long delta=labs((long)mode.dmDisplayFrequency-(long)before.mode.dmDisplayFrequency);
         if(!found||delta<diff){target=mode;diff=delta;found=true;}
     }
-    if(!found){target=before.mode;target.dmPelsWidth=width;target.dmPelsHeight=height;}
+    if(!found){target=before.mode;target.dmPelsWidth=width;target.dmPelsHeight=height;if(cfg.refreshHz)target.dmDisplayFrequency=(DWORD)cfg.refreshHz;}
     Fields(target);code=display.change(before.device,&target,NULL,CDS_TEST,NULL);return code==DISP_CHANGE_SUCCESSFUL;
 }
 static bool Restore(){
@@ -218,10 +271,14 @@ static bool SwitchActiveRule(const Config& value){
         Note(L"恢复记录缺失或损坏，已暂停自动切换");
         return false;
     }
-    if(!display.current(current)||_wcsicmp(current.device,baseline.device)){
-        Note(L"主显示器已变化，尝试恢复原显示模式");
-        Restore();
-        return false;
+    if(!CurrentFor(value,current)){
+        Note(L"目标显示器不可用，尝试恢复原显示模式");
+        Restore();return false;
+    }
+    if(_wcsicmp(current.device,baseline.device)){
+        if(!Restore()||!Apply(value,false))return false;
+        policy.active=true;
+        return true;
     }
     DEVMODEW target={};LONG code;
     if(!FindMode(value,baseline,target,code,&baseline)){
@@ -287,6 +344,15 @@ static void Tick(){
     if((policy.active&&session.platform==4)||(!policy.active&&config.platform==4)){
         if((!config.enabled&&!policy.active)||now<nextPoll)return;
         nextPoll=now+250;
+        if(policy.active&&session.platform==4&&config.enabled){
+            if(!_wcsicmp(foregroundExecutable().c_str(),session.path.c_str()))return;
+            Config running=session;running.platform=3;
+            Presence game,launcher;
+            if(!scanProcesses(running,game,launcher)||game!=Presence::Absent){
+                nextPoll=now+1000;
+                return;
+            }
+        }
         const Config* match=nullptr;
         bool prioritizeDelta=false;
         if(config.enabled&&config.platform==4){
@@ -308,7 +374,7 @@ static void Tick(){
         }
         if(policy.active){
             if(match&&!prioritizeDelta&&!_wcsicmp(match->path.c_str(),session.path.c_str())&&
-               match->automatic==session.automatic&&match->width==session.width&&match->height==session.height)return;
+               match->automatic==session.automatic&&match->width==session.width&&match->height==session.height&&match->refreshHz==session.refreshHz&&match->monitor==session.monitor)return;
             if(now<retryAt)return;
             if(match){
                 if(SwitchActiveRule(*match)){
@@ -337,8 +403,26 @@ static void Tick(){
     if(action==Action::Apply){if(Apply(cfg,false))policy.Applied(game);else retryAt=now+30000;}
     if(action==Action::Restore){if(Restore())policy.Restored(launcher);else retryAt=now+5000;}
 }
+static void MigrateSingleRule(){
+    if(config.platform==4)return;
+    if(GetPrivateProfileIntW(L"Resolution",L"Platform",UINT(-1),iniPath)!=UINT(-1)&&
+       (config.platform<3||!config.path.empty())){
+        Config legacy=config;
+        if(legacy.platform==3)legacy.platform=4;
+        else legacy.path.clear();
+        const auto existing=std::find_if(foregroundRules.begin(),foregroundRules.end(),[&](const Config& rule){
+            return legacy.platform<3?rule.platform<3:
+                rule.platform==4&&!_wcsicmp(rule.path.c_str(),legacy.path.c_str());
+        });
+        if(existing==foregroundRules.end())foregroundRules.push_back(std::move(legacy));
+        else if(config.enabled)*existing=std::move(legacy);
+        if(SaveForegroundRules(foregroundRules))
+            WritePrivateProfileStringW(L"Resolution",L"Platform",L"4",iniPath);
+    }
+    config.platform=4;
+}
 static void Init(){
-    recoveryFile=std::wstring(folder)+L"\\display-recovery.bin";ReadConfig();ReadForegroundRules();pendingRecovery=Exists(recoveryFile);
+    recoveryFile=std::wstring(folder)+L"\\display-recovery.bin";ReadConfig();ReadForegroundRules();MigrateSingleRule();pendingRecovery=Exists(recoveryFile);
     if(pendingRecovery){Note(L"发现未恢复记录，请打开分辨率板块恢复");return;}
     HANDLE legacy=OpenMutexW(SYNCHRONIZE,FALSE,L"Local\\DeltaResolutionWatcher");
     if(legacy){CloseHandle(legacy);config.enabled=false;Note(L"旧版分辨率工具正在运行，请先退出旧版");return;}

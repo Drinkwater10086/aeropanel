@@ -48,6 +48,7 @@ PASS last_real_instance_exit_drives_restore
 PASS foreground_rules_save
 PASS foreground_rules_reload
 PASS foreground_first_rule_applies
+PASS foreground_background_process_retains_game_resolution
 PASS foreground_second_rule_applies
 PASS foreground_rule_handoff_skips_desktop_and_retains_recovery
 PASS foreground_auto_rule_uses_original_height
@@ -91,7 +92,7 @@ PASS single_exe_extracts_verified_capture_runtime
 PASS existing_capture_runtime_verified_and_reused
 PASS replay_real_delta_force_capture_rows
 PASS real_delta_force_capture_fps_regression
-BENCH percentile_2000_iterations full_sort_ms=88.665 partial_selection_ms=16.500 speed_ratio=5.373
+BENCH percentile_2000_iterations full_sort_ms=90.816 partial_selection_ms=18.097 speed_ratio=5.018
 PASS silver_wolf_tray_icon_resource_loads
 PASS two_sections_created_in_same_window
 PASS preblurred_background_loaded_at_fixed_size
@@ -99,6 +100,11 @@ INFO background_bitmap_bytes=921600 runtime_blur_passes=0
 PASS background_toggle_off_releases_bitmap_and_saves_setting
 PASS background_toggle_on_reloads_bitmap
 PASS resolution_tab_hides_monitor_controls
+PASS rule_table_test_starts_empty
+PASS rule_table_create_delta_steam
+PASS rule_table_virtual_channel_cell
+PASS rule_table_update_selected_row
+PASS rule_table_delete_selected_row
 PASS settings_fonts_scale_up_with_window
 PASS monitor_tab_restores_its_controls
 PASS settings_window_renders_with_background_and_controls
@@ -107,4 +113,4 @@ PASS fullscreen_exit_restores_window
 PASS closing_settings_releases_fonts
 PASS closing_settings_releases_artwork_and_icons
 PASS repeated_settings_open_close_does_not_accumulate_gdi_objects
-SUMMARY passed=106 failed=0
+SUMMARY passed=112 failed=0

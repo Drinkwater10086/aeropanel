@@ -8,6 +8,7 @@
 #include <windows.h>
 #include <psapi.h>
 #include <tlhelp32.h>
+#include <commctrl.h>
 #include <shellapi.h>
 #include <dwmapi.h>
 #include <limits.h>
@@ -607,6 +608,7 @@ static LRESULT CALLBACK PickerProc(HWND h,UINT m,WPARAM w,LPARAM l){
         resolutionui::Create(h);resolutionui::Refresh();resolutionui::CurrentMode();
         LayoutPicker(h);SelectSettingsSection(settingsSection);return 0;
     }
+    if(m==WM_NOTIFY&&resolutionui::Notify(reinterpret_cast<NMHDR*>(l)))return 0;
     if(m==WM_TIMER){
         if(w==settingsLayoutTimer){
             KillTimer(h,settingsLayoutTimer);
@@ -653,8 +655,8 @@ static LRESULT CALLBACK PickerProc(HWND h,UINT m,WPARAM w,LPARAM l){
             RedrawWindow(h,NULL,NULL,RDW_INVALIDATE|RDW_ERASE|RDW_ALLCHILDREN);return 0;
         }
         if(id==80||id==81){SelectSettingsSection(id-80);return 0;}
-        if(id==82){std::wstring notice=L"AeroPanel v3.0.8\n硬件监控 + 分辨率切换\n功能参考：github.com/Drinkwater10086/aeropanel\n分辨率模块独立原生实现。\n\n内嵌 PresentMon 2.3.1 许可证：\n"+Wide(CaptureLicense,sizeof(CaptureLicense)-1);MessageBoxW(h,notice.c_str(),L"关于与第三方许可",MB_ICONINFORMATION);return 0;}
-        if(id>=100&&id<=126){if((id!=122&&id!=125)||HIWORD(w)==CBN_SELCHANGE)resolutionui::Command(id);return 0;}
+        if(id==82){std::wstring notice=L"AeroPanel v3.0.9\n硬件监控 + 分辨率切换\n功能参考：github.com/Drinkwater10086/aeropanel\n分辨率模块独立原生实现。\n\n内嵌 PresentMon 2.3.1 许可证：\n"+Wide(CaptureLicense,sizeof(CaptureLicense)-1);MessageBoxW(h,notice.c_str(),L"关于与第三方许可",MB_ICONINFORMATION);return 0;}
+        if(id>=100&&id<=131){if(id==108||id==110){if(HIWORD(w)==EN_KILLFOCUS)resolutionui::Command(id);}else if((id!=125&&id!=128&&id!=129&&id!=130)||HIWORD(w)==CBN_SELCHANGE)resolutionui::Command(id);return 0;}
         if(id==11||id==12){SendMessageW(sensorList,LB_SETSEL,id==11,-1);return 0;}
         if(id==13){
             for(size_t i=0;i<pickerSnapshot.size();++i)WritePrivateProfileStringW(L"Sensors",pickerSnapshot[i].key.c_str(),SendMessageW(sensorList,LB_GETSEL,i,0)>0?L"1":L"0",iniPath);
@@ -704,6 +706,7 @@ static LRESULT CALLBACK PickerProc(HWND h,UINT m,WPARAM w,LPARAM l){
     }
     if(m==WM_NCDESTROY){
         ReleaseSettingsTheme();
+        resolutionui::ReleaseRuleUI();
         std::vector<Sensor>().swap(pickerSnapshot);
         if(settingsFont)DeleteObject(settingsFont);if(settingsPreviewFont)DeleteObject(settingsPreviewFont);
         settingsFont=settingsPreviewFont=NULL;settingsFontPixels=0;
@@ -826,7 +829,7 @@ static LRESULT CALLBACK PanelProc(HWND h,UINT m,WPARAM w,LPARAM l){
         scrollRow=Clamp(scrollRow+(delta>0?-3:3),0,std::max(0,count-1));RefreshPanel();return 0;}
     case WM_ERASEBKGND:return 1;
     case WM_PAINT:{PAINTSTRUCT ps;HDC dc=BeginPaint(h,&ps);if(!transparentBackground){RECT r;GetClientRect(h,&r);PaintPanel(dc,r);}EndPaint(h,&ps);if(transparentBackground)RefreshPanel();return 0;}
-    case WM_DISPLAYCHANGE:RestorePosition();RefreshPanel();resolutionui::CurrentMode();return 0;
+    case WM_DISPLAYCHANGE:RestorePosition();RefreshPanel();resolutionui::DisplayChanged();return 0;
     case WM_CONTEXTMENU:ShowMenu();return 0;
     case WM_CLOSE:DestroyWindow(h);return 0;
     case WM_DESTROY:UnregisterHotKey(h,overlayHotkeyId);resolution::Shutdown();DeleteTray();KillTimer(h,1);KillTimer(h,2);if(picker)DestroyWindow(picker);PostQuitMessage(0);return 0;

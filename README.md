@@ -6,7 +6,7 @@
 
 ## 下载
 
-前往 [Releases](https://github.com/Drinkwater10086/aeropanel/releases/latest)，下载 `AeroPanel-v3.0.8-win-x64.zip`，解压到可写目录并运行 `AeroPanel.exe`。请保留 ZIP 中的 runtime 目录。发行包适用于 Windows x64。
+前往 [Releases](https://github.com/Drinkwater10086/aeropanel/releases/latest)，下载 `AeroPanel-v3.0.9-win-x64.zip`，解压到可写目录并运行 `AeroPanel.exe`。请保留 ZIP 中的 runtime 目录。发行包适用于 Windows x64。
 
 ## 两个板块
 
@@ -24,7 +24,7 @@
 - EXE 内嵌 **PresentMon 2.3.1**，首次运行验证并展开到 `runtime/PresentMon.exe`，由主程序管理帧采集子进程。因此单 EXE 交付不表示所有采集都在同一进程中。
 - 帧率读取依赖 ETW 权限和目标程序是否产生可捕获的呈现事件；受 ETW 丢事件影响，不保证与游戏内计数或其他基准完全一致。无有效新数据时显示 N/A。
 - 置顶基于 Windows 窗口机制，不能保证覆盖独占全屏游戏、系统安全桌面或其他特殊合成界面。
-- 分辨率仅操作主显示器，能否切换取决于驱动支持，不修改永久显示配置。
+- 分辨率规则可指定显示器、宽高与刷新率，默认使用主显示器。切换由显示驱动验证，目标进程退出后恢复原显示模式。
 
 ## 构建与测试
 

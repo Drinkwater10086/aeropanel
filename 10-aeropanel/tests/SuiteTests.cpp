@@ -129,6 +129,10 @@ static void ForegroundRuleTests(){
     config=a;
     fakeForegroundPath=a.path;Tick();
     Check(policy.active&&fakeMode.mode.dmPelsWidth==2880,"foreground_first_rule_applies");
+    fakeDeltaGame=Presence::Present;scanProcesses=FakeDeltaScan;
+    fakeForegroundPath=b.path;nextPoll=0;Tick();
+    Check(policy.active&&fakeMode.mode.dmPelsWidth==2880,"foreground_background_process_retains_game_resolution");
+    fakeDeltaGame=Presence::Absent;scanProcesses=Scan;
     fakeForegroundPath=b.path;nextPoll=0;Tick();
     Check(policy.active&&fakeMode.mode.dmPelsWidth==1920,"foreground_second_rule_applies");
     SavedMode baseline;
@@ -285,6 +289,27 @@ static void UiTests(){
     SendMessageW(GetDlgItem(picker,83),BM_SETCHECK,BST_CHECKED,0);SendMessageW(picker,WM_COMMAND,83,0);
     Check(settingsArtworkDC&&Setting(L"SilverWolfBackground",0)==1,"background_toggle_on_reloads_bitmap");
     SelectSettingsSection(1);Check((GetWindowLongW(GetDlgItem(picker,100),GWL_STYLE)&WS_VISIBLE)&&!(GetWindowLongW(GetDlgItem(picker,10),GWL_STYLE)&WS_VISIBLE),"resolution_tab_hides_monitor_controls");
+    Check(resolution::SaveForegroundRules({}),"rule_table_test_starts_empty");
+    resolutionui::RefreshRules();
+    SendMessageW(picker,WM_COMMAND,123,0);
+    SetDlgItemInt(picker,108,1280,FALSE);SetDlgItemInt(picker,110,960,FALSE);
+    SendMessageW(picker,WM_COMMAND,127,0);
+    resolutionui::SelectMonitor(L"test-monitor-id");
+    resolutionui::SelectRefreshRate(144);SendMessageW(picker,WM_COMMAND,127,0);
+    resolution::ReadForegroundRules();
+    HWND table=GetDlgItem(picker,122);
+    Check(SendMessageW(table,LVM_GETITEMCOUNT,0,0)==1&&resolution::foregroundRules.size()==1&&
+        resolution::foregroundRules[0].width==1280&&resolution::foregroundRules[0].height==960&&
+        resolution::foregroundRules[0].platform==0&&resolution::foregroundRules[0].refreshHz==144&&resolution::foregroundRules[0].monitor==L"test-monitor-id","rule_table_create_delta_steam");
+    wchar_t cell[48]={};LVITEMW item={};item.iSubItem=4;item.pszText=cell;item.cchTextMax=48;
+    SendMessageW(table,LVM_GETITEMTEXTW,0,(LPARAM)&item);
+    Check(!wcscmp(cell,L"Steam"),"rule_table_virtual_channel_cell");
+    SetDlgItemInt(picker,108,1600,FALSE);SendMessageW(picker,WM_COMMAND,127,0);
+    Check(resolution::foregroundRules.size()==1&&resolution::foregroundRules[0].width==1600,
+        "rule_table_update_selected_row");
+    SendMessageW(picker,WM_COMMAND,124,0);
+    Check(resolution::foregroundRules.empty()&&SendMessageW(table,LVM_GETITEMCOUNT,0,0)==0,
+        "rule_table_delete_selected_row");
     int small=settingsFontPixels;SetWindowPos(picker,NULL,0,0,1920,1080,SWP_NOZORDER|SWP_NOACTIVATE);
     Check(settingsFontPixels>small,"settings_fonts_scale_up_with_window");
     SelectSettingsSection(0);Check((GetWindowLongW(sensorList,GWL_STYLE)&WS_VISIBLE)&&!(GetWindowLongW(GetDlgItem(picker,100),GWL_STYLE)&WS_VISIBLE),"monitor_tab_restores_its_controls");
