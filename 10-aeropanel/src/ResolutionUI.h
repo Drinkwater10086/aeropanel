@@ -186,8 +186,7 @@ static bool Command(int id){
                 return item.platform==4&&!_wcsicmp(rule.path.c_str(),item.path.c_str());
             });
             if(existing!=rules.end()){selection=(int)(existing-rules.begin());*existing=rule;}
-            else if(rules.size()<resolution::maxForegroundRules){selection=(int)rules.size();rules.push_back(rule);}
-            else {MessageBoxW(picker,L"最多支持 24 条规则。",L"分辨率规则",MB_ICONINFORMATION);return true;}
+            else {selection=(int)rules.size();rules.push_back(rule);}
         }
         if(resolution::SaveForegroundRules(rules)){
             RefreshRules();

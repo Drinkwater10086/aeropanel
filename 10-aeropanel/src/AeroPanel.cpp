@@ -1,4 +1,4 @@
-﻿// Independent monitor: reads MAHMSharedMemory, never RTSS shared memory.
+// Hardware sensors come from the LibreHardwareMonitor worker.
 // Optional PresentMon CLI captures frame timing in a uniquely named session.
 #define WIN32_LEAN_AND_MEAN
 #ifndef UNICODE
@@ -7,11 +7,13 @@
 #include <winsock2.h>
 #include <windows.h>
 #include <psapi.h>
+#include <tlhelp32.h>
 #include <shellapi.h>
 #include <dwmapi.h>
 #include <limits.h>
 #include <stdio.h>
 #include <float.h>
+#include <time.h>
 #include <math.h>
 #include <algorithm>
 #include <deque>
@@ -34,9 +36,8 @@ static HFONT osdFont, graphValueFont;
 static HBRUSH settingsBrush;
 static HINSTANCE appInstance;
 static wchar_t iniPath[MAX_PATH], logPath[MAX_PATH], folder[MAX_PATH];
-static wchar_t afterburnerConfig[MAX_PATH],afterburnerProfile[MAX_PATH];
 static int xPos=0,yPos=0,panelWidth=700,panelHeight=420,interval=1000,scrollRow=0;
-static bool followAfterburner=true, drawGraphs=true;
+static bool drawGraphs=true;
 static bool transparentBackground=true,compactStyle=true,panelVisible=true,clickThrough=true;
 static int fontSize=26;
 static HDC layerDC=NULL;
@@ -52,7 +53,7 @@ static void RefreshPanel();
 static void ShowMenu();
 static ULONGLONG quitAt=0;
 static std::wstring statusText;
-static std::wstring hardwareCaption=L"AEROPANEL / 硬件数据：MSI Afterburner";
+static std::wstring hardwareCaption=L"AEROPANEL / 硬件数据：LibreHardwareMonitor";
 struct Sensor {
     std::wstring name,units;
     std::wstring key;
@@ -74,8 +75,6 @@ static std::wstring Wide(const char* p,size_t cap) {
     if(len)MultiByteToWideChar(CP_ACP,0,p,(int)n,&text[0],len);
     return text;
 }
-static DWORD Read32(const BYTE* p) {DWORD v;memcpy(&v,p,4);return v;}
-static float ReadFloat(const BYTE* p) {float v;memcpy(&v,p,4);return v;}
 static void Log(const wchar_t* text) {
     FILE* f=_wfopen(logPath,L"a, ccs=UTF-8");if(f){fwprintf(f,L"%ls\n",text);fclose(f);}
 }
@@ -91,6 +90,14 @@ static std::wstring SensorKey(DWORD source,DWORD gpu,const char* name) {
     wchar_t text[80];swprintf(text,80,L"%08lX_%08lX_%08lX",(unsigned long)source,(unsigned long)gpu,(unsigned long)hash);
     return text;
 }
+static std::map<std::wstring,bool> sensorSelection;
+static bool SensorSelected(const std::wstring& key,bool fallback){
+    auto found=sensorSelection.find(key);
+    if(found!=sensorSelection.end())return found->second;
+    const bool selected=GetPrivateProfileIntW(L"Sensors",key.c_str(),fallback,iniPath)!=0;
+    sensorSelection.emplace(key,selected);
+    return selected;
+}
 static void PublishSensors(std::vector<Sensor>& next){
     const wchar_t* names[]={L"Framerate",L"Frametime",L"Minimum FPS",L"Average FPS",L"Maximum FPS",L"1% low FPS",L"0.1% low FPS"};
     for(DWORD id=0x50;id<=0x56;++id){
@@ -99,7 +106,7 @@ static void PublishSensors(std::vector<Sensor>& next){
         Sensor sensor; sensor.source=id;sensor.gpu=0xFFFFFFFF; sensor.flags=0;
         sensor.name=names[id-0x50];sensor.units=id==0x51?L"ms":L"FPS";
         sensor.key=L"IndependentFrame_"+std::to_wstring(id);
-        sensor.selected=followAfterburner?(id==0x50||id==0x51||id==0x55):GetPrivateProfileIntW(L"Sensors",sensor.key.c_str(),0,iniPath)!=0;
+        sensor.selected=SensorSelected(sensor.key,id==0x50||id==0x51||id==0x55);
         sensor.value=sensor.selected?(float)FrameValue(id):NAN;sensor.valid=isfinite(sensor.value);next.push_back(std::move(sensor));
     }
     sensors.swap(next);
@@ -107,72 +114,108 @@ static void PublishSensors(std::vector<Sensor>& next){
     for(const Sensor& sensor:sensors)if(sensor.selected){auto& values=history[sensor.key];values.push_back(sensor.valid?sensor.value:NAN);if(values.size()>60)values.pop_front();}
     ++updateCount;
 }
-static bool ReadSensors() {
-    // Keep the previous vector's capacity after PublishSensors swaps it out.
-    static std::vector<Sensor> next;
+static void TryStartAfterburner(){
+    HANDLE snapshot=CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS,0);
+    if(snapshot==INVALID_HANDLE_VALUE)return;
+    PROCESSENTRY32W process={sizeof(process)};
+    bool running=false;
+    if(Process32FirstW(snapshot,&process))do{
+        if(!_wcsicmp(process.szExeFile,L"MSIAfterburner.exe")){running=true;break;}
+    }while(Process32NextW(snapshot,&process));
+    CloseHandle(snapshot);
+    if(running)return;
+    wchar_t root[MAX_PATH];
+    DWORD length=GetEnvironmentVariableW(L"ProgramFiles(x86)",root,MAX_PATH);
+    if(!length)length=GetEnvironmentVariableW(L"ProgramFiles",root,MAX_PATH);
+    if(!length||length>=MAX_PATH)return;
+    const std::wstring directory=std::wstring(root)+L"\\MSI Afterburner";
+    const std::wstring executable=directory+L"\\MSIAfterburner.exe";
+    if(GetFileAttributesW(executable.c_str())==INVALID_FILE_ATTRIBUTES)return;
+    const INT_PTR result=(INT_PTR)ShellExecuteW(panel,L"open",executable.c_str(),NULL,directory.c_str(),SW_SHOWMINNOACTIVE);
+    Log(result>32?L"Requested MSI Afterburner startup.":L"MSI Afterburner startup unavailable.");
+}
+
+static unsigned ReadAfterburner(float (&values)[13],const char* const (&names)[13]){
     HANDLE map=OpenFileMappingW(FILE_MAP_READ,FALSE,L"MAHMSharedMemory");
-    if(!map){statusText=L"请运行 MSI Afterburner；本程序无需 RTSS。";PublishSensors(next);return false;}
-    const BYTE* view=(const BYTE*)MapViewOfFile(map,FILE_MAP_READ,0,0,0);
-    if(!view){CloseHandle(map);statusText=L"无法读取 Afterburner 数据，请检查运行权限。";PublishSensors(next);return false;}
-    MEMORY_BASIC_INFORMATION region={};VirtualQuery(view,&region,sizeof(region));
-    bool valid=region.RegionSize>=32 && Read32(view)==0x4D41484D && Read32(view+4)==0x20000;
-    DWORD header=valid?Read32(view+8):0,count=valid?Read32(view+12):0,stride=valid?Read32(view+16):0;
-    valid=valid && header>=32 && stride>=1324 && count<=4096 &&
-        (ULONGLONG)header+(ULONGLONG)stride*count<=region.RegionSize;
-    DWORD stamp=valid?Read32(view+20):0;
-    if(valid) {
-        next.reserve(count+7);
-        const bool readAfterburnerProfile=followAfterburner&&afterburnerConfig[0]&&
-            !GetPrivateProfileIntW(L"Settings",L"EnableServer",1,afterburnerConfig);
-        DWORD gpuCount=Read32(view+24),gpuStride=Read32(view+28);
-        ULONGLONG gpuOffset=(ULONGLONG)header+(ULONGLONG)stride*count;
-        std::map<DWORD,std::wstring> devices;
-        if(gpuCount<=64&&gpuStride>=1304&&gpuOffset+(ULONGLONG)gpuStride*gpuCount<=region.RegionSize){
-            for(DWORD i=0;i<gpuCount;++i)devices[i]=Wide((const char*)view+(size_t)gpuOffset+(size_t)i*gpuStride+520,260);
-        }
-        std::map<DWORD,bool> activeDevices;
-        for(DWORD i=0;i<count;++i) {
-            // Copy fixed fields to avoid retaining any pointers into another process's view.
-            BYTE entry[1324];memcpy(entry,view+header+(size_t)i*stride,sizeof(entry));
-            Sensor s;
-            s.source=Read32(entry+1320);s.gpu=Read32(entry+1316);s.flags=Read32(entry+1312);
-            s.key=SensorKey(s.source,s.gpu,(const char*)entry);
-            s.name=Wide((const char*)entry,260);
-            if(s.name.empty())s.name=Wide((const char*)entry+520,260);
-            s.units=Wide((const char*)entry+260,260);
-            if(entry[260]==(BYTE)0xB0 && (entry[261]=='C'||entry[261]=='F'))s.units=entry[261]=='C'?L"°C":L"°F";
-            s.value=ReadFloat(entry+1300);s.valid=isfinite(s.value) && fabs(s.value)<FLT_MAX/2;
-            if(IsFrameSource(s.source)){double v=FrameValue(s.source);s.value=(float)v;s.valid=isfinite(v);}
-            if(s.gpu!=0xFFFFFFFFu && ((s.source<0x80 && !IsFrameSource(s.source)) ||
-                (s.source>=0xB0 && s.source<=0xF0))){
-                activeDevices[s.gpu]=true;
-                if(s.name.find(L"GPU")!=0){wchar_t suffix[40];swprintf(suffix,40,L" [GPU %lu]",(unsigned long)s.gpu+1);s.name+=suffix;}
+    if(!map)return 0;
+    const auto* view=(const BYTE*)MapViewOfFile(map,FILE_MAP_READ,0,0,0);
+    if(!view){CloseHandle(map);return 0;}
+    MEMORY_BASIC_INFORMATION region={};
+    unsigned found=0;
+    auto word=[](const BYTE* bytes){DWORD value;memcpy(&value,bytes,sizeof(value));return value;};
+    if(VirtualQuery(view,&region,sizeof(region))&&region.RegionSize>=32&&
+       word(view)==0x4D41484D&&word(view+4)==0x20000){
+        const DWORD header=word(view+8),count=word(view+12),stride=word(view+16),stamp=word(view+20);
+        const auto now=(ULONGLONG)time(NULL);
+        if(header>=32&&count<=4096&&stride>=1324&&header+(ULONGLONG)count*stride<=region.RegionSize&&
+           stamp&&stamp<=now+2&&now<=stamp+10ULL){
+            for(DWORD i=0;i<count;++i){
+                const BYTE* row=view+header+(size_t)i*stride;
+                float value;memcpy(&value,row+1300,sizeof(value));
+                if(!isfinite(value)||fabs(value)>FLT_MAX/2)continue;
+                for(size_t j=0;j<13;++j)
+                    if(!strncmp((const char*)row,names[j],260)){
+                        values[j]=value;found|=1u<<j;break;
+                    }
             }
-            if(s.source==0xA0&&s.name==L"CPU clock")s.name=L"CPU报告频率（Afterburner）";
-            bool publishedSelection=(s.flags&1)!=0;
-            // Disabling Afterburner's RTSS link also clears its shared OSD flags.
-            // Read the existing monitoring selection without enabling the server.
-            if(readAfterburnerProfile){
-                std::wstring section=L"Source "+Wide((const char*)entry,260);
-                publishedSelection=GetPrivateProfileIntW(section.c_str(),L"ShowInOSD",publishedSelection,afterburnerProfile)!=0;
-            }
-            s.selected=followAfterburner ? publishedSelection :
-                GetPrivateProfileIntW(L"Sensors",s.key.c_str(),0,iniPath)!=0;
-            next.push_back(std::move(s));
         }
-        hardwareCaption=L"AEROPANEL / ";
-        for(const auto& device:activeDevices){auto name=devices.find(device.first);
-            if(name!=devices.end()&&!name->second.empty())hardwareCaption+=L"GPU"+std::to_wstring(device.first+1)+L" · "+name->second+L"  ";}
-        if(activeDevices.empty())hardwareCaption+=L"硬件数据：MSI Afterburner";
     }
     UnmapViewOfFile(view);CloseHandle(map);
-    if(!valid){statusText=L"Afterburner 共享内存格式不匹配。";next.clear();PublishSensors(next);return false;}
-    FILETIME ft;GetSystemTimeAsFileTime(&ft);ULARGE_INTEGER now;now.LowPart=ft.dwLowDateTime;now.HighPart=ft.dwHighDateTime;
-    ULONGLONG seconds=now.QuadPart/10000000ULL-11644473600ULL;
-    bool stale=stamp && seconds>(ULONGLONG)stamp+10;
-    if(stale)for(Sensor& s:next)if(!IsFrameSource(s.source))s.valid=false;
-    statusText=stale?L"硬件数据源超过 10 秒未更新，显示 N/A。":L"";
-    PublishSensors(next);return true;
+    return found;
+}
+
+static bool ReadSensors() {
+    struct Field {DWORD source,gpu;const char* legacyName;const wchar_t* label;const wchar_t* unit;bool defaultSelected;};
+    static const Field fields[]={
+        {0x00,1,"GPU2 temperature",L"GPU 温度",L"°C",true},
+        {0x30,1,"GPU2 usage",L"GPU 占用率",L"%",true},
+        {0x33,1,"GPU2 VID usage",L"GPU 视频引擎占用率",L"%",false},
+        {0x31,1,"GPU2 memory usage",L"显存用量",L"MB",true},
+        {0x20,1,"GPU2 core clock",L"GPU 核心频率",L"MHz",true},
+        {0x22,1,"GPU2 memory clock",L"显存频率",L"MHz",true},
+        {0x61,1,"GPU2 power",L"GPU 功耗",L"W",true},
+        {0x40,1,"GPU2 voltage",L"GPU 核心电压",L"V",true},
+        {0x80,0xFFFFFFFF,"CPU temperature",L"CPU 温度",L"°C",true},
+        {0x90,0xFFFFFFFF,"CPU usage",L"CPU 占用率",L"%",true},
+        {0xA0,0xFFFFFFFF,"CPU clock",L"CPU 平均核心频率",L"MHz",true},
+        {0x100,0xFFFFFFFF,"CPU power",L"CPU 封装功耗",L"W",true},
+        {0x91,0,"RAM usage",L"物理内存用量",L"MB",true},
+        {0xA001,0xFFFFFFFF,nullptr,L"CPU Vcore（主板）",L"V",false},
+    };
+    static_assert(sizeof(fields)/sizeof(fields[0])==hardwareFieldCount);
+    static std::vector<Sensor> next;
+    static float lastAfterburner[13];
+    static ULONGLONG lastCompleteAfterburner=0;
+    float afterburner[13];
+    std::fill_n(afterburner,13,NAN);
+    const char* names[13];
+    for(size_t i=0;i<13;++i)names[i]=fields[i].legacyName;
+    const auto now=GetTickCount64();
+    if(ReadAfterburner(afterburner,names)==0x1fff){
+        memcpy(lastAfterburner,afterburner,sizeof(afterburner));
+        lastCompleteAfterburner=now;
+    }
+    // A partially updated snapshot should not restart the hardware worker.
+    const bool shared=lastCompleteAfterburner&&now-lastCompleteAfterburner<=3000;
+    if(shared)memcpy(afterburner,lastAfterburner,sizeof(afterburner));
+    if(shared!=afterburnerReady)Log(shared?L"Hardware source: MSI Afterburner + CPU voltage worker.":L"Hardware source: full LibreHardwareMonitor worker.");
+    afterburnerReady=shared;
+    hardwareCaption=shared?L"AEROPANEL / 硬件数据：MSI Afterburner":L"AEROPANEL / 硬件数据：LibreHardwareMonitor";
+    const bool fresh=voltageReceived&&GetTickCount64()-voltageReceived<=4500;
+    for(size_t i=0;i<hardwareFieldCount;++i){
+        const auto& field=fields[i];
+        if(i==hardwareFieldCount-1&&!cpuVoltageEnabled)continue;
+        Sensor s{};
+        s.source=field.source;s.gpu=field.gpu;s.name=field.label;s.units=field.unit;
+        s.key=field.legacyName?SensorKey(field.source,field.gpu,field.legacyName):L"CpuVcore";
+        s.selected=SensorSelected(s.key,field.defaultSelected||!field.legacyName);
+        const bool useShared=shared&&i<13;
+        if(useShared&&i==10)s.name=L"CPU 报告频率";
+        s.value=useShared?afterburner[i]:hardwareValues[i];s.valid=(useShared||fresh)&&isfinite(s.value);
+        next.push_back(std::move(s));
+    }
+    statusText=shared||fresh||!panelVisible?L"":L"LibreHardwareMonitor：等待硬件读数";
+    PublishSensors(next);return fresh;
 }
 static void RestorePosition() {
     if(!panelVisible)return;
@@ -182,9 +225,9 @@ static void RestorePosition() {
     SetWindowPos(panel,HWND_TOPMOST,xPos,yPos,panelWidth,panelHeight,SWP_NOACTIVATE|SWP_SHOWWINDOW);
 }
 static void LoadSettings() {
+    sensorSelection.clear();
     xPos=Setting(L"X",0);yPos=Setting(L"Y",0);panelWidth=Clamp(Setting(L"Width",700),320,3000);
     panelHeight=Clamp(Setting(L"Height",420),160,2000);interval=Clamp(Setting(L"RefreshMs",1000),250,5000);
-    followAfterburner=GetPrivateProfileIntW(L"Selection",L"FollowAfterburner",1,iniPath)!=0;
     drawGraphs=Setting(L"Graphs",1)!=0;
     transparentBackground=Setting(L"Transparent",1)!=0;
     compactStyle=Setting(L"CompactStyle",1)!=0;
@@ -192,6 +235,7 @@ static void LoadSettings() {
     fontSize=Clamp(Setting(L"FontSize",26),12,36);
     captureEnabled=GetPrivateProfileIntW(L"Capture",L"Enabled",1,iniPath)!=0;
     apiAdmin=GetPrivateProfileIntW(L"Capture",L"APIAdmin",0,iniPath)!=0;
+    cpuVoltageEnabled=GetPrivateProfileIntW(L"Capture",L"BoardVoltage",GetPrivateProfileIntW(L"Capture",L"AMDVoltage",0,iniPath),iniPath)!=0;
     configuredTarget=GetPrivateProfileIntW(L"Capture",L"TargetPID",0,iniPath);
 }
 static void ApplyAppearance() {
@@ -267,10 +311,10 @@ static void PaintCompact(HDC dc,RECT rect) {
     for(const Sensor& s:sensors)if(s.selected&&!hasGraph(s)){int group=extra++;
         DWORD gpu=s.gpu==0xFFFFFFFF?0:s.gpu;
         if(gpu<64){
-            if(s.source==0||s.source==0x30||s.source==0x20||s.source==0x61||s.source==0x40)group=(int)gpu*2;
+            if(s.source==0||s.source==0x30||s.source==0x33||s.source==0x20||s.source==0x61||s.source==0x40)group=(int)gpu*2;
             else if(s.source==0x31||s.source==0x22)group=(int)gpu*2+1;
         }
-        if(s.source==0x80||s.source==0x90||s.source==0xA0||s.source==0x100)group=10000;
+        if(s.source==0x80||s.source==0x90||s.source==0xA0||s.source==0x100||s.source==0xA001)group=10000;
         if(s.source==0x91||s.source==0x92)group=10001;
         if(IsFrameSource(s.source))group=10002;
         groups[group].push_back(&s);
@@ -344,7 +388,7 @@ static void RefreshPanel() {
     if(!panelVisible)return;
     static ULONGLONG lastDesktopPaint=0;ULONGLONG now=GetTickCount64();
     if(DesktopIdle()){if(lastDesktopPaint&&now-lastDesktopPaint<1000)return;lastDesktopPaint=now;}else lastDesktopPaint=0;
-    if(!transparentBackground){InvalidateRect(panel,NULL,FALSE);return;}
+    if(!transparentBackground){ReleaseLayer();InvalidateRect(panel,NULL,FALSE);return;}
     if(!layerDC||layerWidth!=panelWidth||layerHeight!=panelHeight){
         ReleaseLayer();HDC screen=GetDC(NULL);layerDC=CreateCompatibleDC(screen);
         BITMAPINFO bitmap={};bitmap.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);
@@ -609,10 +653,10 @@ static LRESULT CALLBACK PickerProc(HWND h,UINT m,WPARAM w,LPARAM l){
             RedrawWindow(h,NULL,NULL,RDW_INVALIDATE|RDW_ERASE|RDW_ALLCHILDREN);return 0;
         }
         if(id==80||id==81){SelectSettingsSection(id-80);return 0;}
-        if(id==82){std::wstring notice=L"AeroPanel v3.0.7\n硬件监控 + 分辨率切换\n功能参考：github.com/Drinkwater10086/aeropanel\n分辨率模块独立原生实现。\n\n内嵌 PresentMon 2.3.1 许可证：\n"+Wide(CaptureLicense,sizeof(CaptureLicense)-1);MessageBoxW(h,notice.c_str(),L"关于与第三方许可",MB_ICONINFORMATION);return 0;}
+        if(id==82){std::wstring notice=L"AeroPanel v3.0.8\n硬件监控 + 分辨率切换\n功能参考：github.com/Drinkwater10086/aeropanel\n分辨率模块独立原生实现。\n\n内嵌 PresentMon 2.3.1 许可证：\n"+Wide(CaptureLicense,sizeof(CaptureLicense)-1);MessageBoxW(h,notice.c_str(),L"关于与第三方许可",MB_ICONINFORMATION);return 0;}
         if(id>=100&&id<=126){if((id!=122&&id!=125)||HIWORD(w)==CBN_SELCHANGE)resolutionui::Command(id);return 0;}
         if(id==11||id==12){SendMessageW(sensorList,LB_SETSEL,id==11,-1);return 0;}
-        if(id==13){WritePrivateProfileStringW(L"Selection",L"FollowAfterburner",L"0",iniPath);
+        if(id==13){
             for(size_t i=0;i<pickerSnapshot.size();++i)WritePrivateProfileStringW(L"Sensors",pickerSnapshot[i].key.c_str(),SendMessageW(sensorList,LB_GETSEL,i,0)>0?L"1":L"0",iniPath);
             SetLocal(L"GraphStyle",(int)SendMessageW(GetDlgItem(h,30),CB_GETCURSEL,0,0));
             SetLocal(L"GraphScope",(int)SendMessageW(GetDlgItem(h,31),CB_GETCURSEL,0,0));
@@ -625,7 +669,7 @@ static LRESULT CALLBACK PickerProc(HWND h,UINT m,WPARAM w,LPARAM l){
             bool enabled=SendMessageW(GetDlgItem(h,35),BM_GETCHECK,0,0)==BST_CHECKED;
             WritePrivateProfileStringW(L"Capture",L"Enabled",enabled?L"1":L"0",iniPath);
             wchar_t pid[40];GetDlgItemTextW(h,39,pid,40);WritePrivateProfileStringW(L"Capture",L"TargetPID",pid,iniPath);
-            LoadSettings();if(captureEnabled)StartFrames();else StopFrames();
+            LoadSettings();if(captureEnabled&&panelVisible)StartFrames();else StopFrames();
             scrollRow=0;ApplyAppearance();RestorePosition();ReadSensors();RefreshPanel();DestroyWindow(h);return 0;}
         if(id==14){DestroyWindow(h);return 0;}
     }
@@ -660,6 +704,7 @@ static LRESULT CALLBACK PickerProc(HWND h,UINT m,WPARAM w,LPARAM l){
     }
     if(m==WM_NCDESTROY){
         ReleaseSettingsTheme();
+        std::vector<Sensor>().swap(pickerSnapshot);
         if(settingsFont)DeleteObject(settingsFont);if(settingsPreviewFont)DeleteObject(settingsPreviewFont);
         settingsFont=settingsPreviewFont=NULL;settingsFontPixels=0;
     }
@@ -676,14 +721,39 @@ static void SetApiAdmin(bool enabled){
     if(enabled&&!apiBroker.process){apiAdmin=false;if(captureEnabled)StartApi();}
     WritePrivateProfileStringW(L"Capture",L"APIAdmin",apiAdmin?L"1":L"0",iniPath);
 }
+static constexpr int overlayHotkeyId=101;
+static void RegisterOverlayHotkey(){
+    UnregisterHotKey(panel,overlayHotkeyId);
+    const UINT key=GetPrivateProfileIntW(L"Hotkey",L"Key",VK_F10,iniPath);
+    const UINT modifiers=GetPrivateProfileIntW(L"Hotkey",L"Modifiers",MOD_CONTROL|MOD_ALT,iniPath);
+    if(!key)return;
+    if(key>254||!modifiers||(modifiers&~(MOD_ALT|MOD_CONTROL|MOD_SHIFT|MOD_WIN))||
+       !RegisterHotKey(panel,overlayHotkeyId,modifiers|MOD_NOREPEAT,key))
+        Log(L"Overlay hotkey unavailable: invalid or already registered.");
+    else Log(L"Overlay hotkey registered.");
+}
+static void ToggleOverlay(){
+    panelVisible=!panelVisible;
+    if(panelVisible){
+        videoBridge::Start();
+        if(captureEnabled)StartFrames();
+        ReadSensors();RestorePosition();RefreshPanel();
+        Log(L"Overlay shown; frame capture restored according to settings.");
+    }else{
+        ShowWindow(panel,SW_HIDE);ReleaseLayer();
+        videoBridge::Stop();StopFrames();
+        for(const auto& sensor:sensors)if(IsFrameSource(sensor.source))history.erase(sensor.key);
+        Log(L"Overlay hidden; frame capture paused.");
+    }
+}
 static void ShowMenu(){
     HMENU menu=CreatePopupMenu();
     AppendMenuW(menu,MF_STRING,6,panelVisible?L"隐藏监控显示":L"显示监控");
     AppendMenuW(menu,MF_STRING,1,L"监控设置 / 传感器…");
-    AppendMenuW(menu,MF_STRING,2,L"使用 Afterburner 当前 OSD 选择");
     AppendMenuW(menu,MF_STRING,3,fpsProcess?L"停止独立 FPS 采集":L"启用独立 FPS 采集");
     AppendMenuW(menu,MF_STRING|(apiAdmin?MF_CHECKED:0),14,L"增强 API 识别（管理员）");
     AppendMenuW(menu,MF_STRING,15,L"反馈帧率缺失（GitHub Issue）");
+    AppendMenuW(menu,MF_STRING|(cpuVoltageEnabled?MF_CHECKED:0),16,L"CPU Vcore（主板）");
     AppendMenuW(menu,MF_SEPARATOR,0,NULL);
     AppendMenuW(menu,MF_STRING|(transparentBackground?MF_CHECKED:0),7,L"透明背景");
     AppendMenuW(menu,MF_STRING|(clickThrough?MF_CHECKED:0),8,L"鼠标穿透（透明模式）");
@@ -698,9 +768,13 @@ static void ShowMenu(){
     POINT pt;GetCursorPos(&pt);SetForegroundWindow(panel);
     UINT id=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_NONOTIFY,pt.x,pt.y,0,panel,NULL);DestroyMenu(menu);PostMessageW(panel,WM_NULL,0,0);
     if(id==1)OpenPicker();
-    if(id==2){followAfterburner=true;WritePrivateProfileStringW(L"Selection",L"FollowAfterburner",L"1",iniPath);scrollRow=0;ReadSensors();}
-    if(id==3){captureEnabled=!captureEnabled;WritePrivateProfileStringW(L"Capture",L"Enabled",captureEnabled?L"1":L"0",iniPath);if(captureEnabled)StartFrames();else StopFrames();}
+    if(id==3){captureEnabled=!captureEnabled;WritePrivateProfileStringW(L"Capture",L"Enabled",captureEnabled?L"1":L"0",iniPath);if(captureEnabled&&panelVisible)StartFrames();else StopFrames();}
     if(id==14)SetApiAdmin(!apiAdmin);
+    if(id==16){
+        cpuVoltageEnabled=!cpuVoltageEnabled;
+        WritePrivateProfileStringW(L"Capture",L"BoardVoltage",cpuVoltageEnabled?L"1":L"0",iniPath);
+        ReadSensors();
+    }
     if(id==15){
         const auto result=ShellExecuteW(panel,L"open",
             L"https://github.com/Drinkwater10086/aeropanel/issues/new?title=%5BFPS%5D%20",
@@ -708,8 +782,8 @@ static void ShowMenu(){
         if((INT_PTR)result<=32)MessageBoxW(panel,L"请访问 github.com/Drinkwater10086/aeropanel/issues",
             L"无法打开反馈页面",MB_OK|MB_ICONINFORMATION);
     }
-    if(id==4){LoadSettings();if(captureEnabled)StartFrames();else StopFrames();ApplyAppearance();SetTimer(panel,1,interval,NULL);RestorePosition();ReadSensors();}
-    if(id==6){panelVisible=!panelVisible;if(panelVisible)RestorePosition();else ShowWindow(panel,SW_HIDE);}
+    if(id==4){LoadSettings();RegisterOverlayHotkey();if(captureEnabled&&panelVisible)StartFrames();else StopFrames();ApplyAppearance();SetTimer(panel,1,interval,NULL);RestorePosition();ReadSensors();}
+    if(id==6)ToggleOverlay();
     if(id==7){transparentBackground=!transparentBackground;SetLocal(L"Transparent",transparentBackground);ApplyAppearance();}
     if(id==8){clickThrough=!clickThrough;SetLocal(L"ClickThrough",clickThrough);ApplyAppearance();}
     if(id==9){compactStyle=!compactStyle;scrollRow=0;SetLocal(L"CompactStyle",compactStyle);}
@@ -732,8 +806,21 @@ static LRESULT CALLBACK PanelProc(HWND h,UINT m,WPARAM w,LPARAM l){
     switch(m){
     case WM_TIMER:
         if(quitAt&&GetTickCount64()>=quitAt){DestroyWindow(h);return 0;}
-        if(w==1){ReadSensors();RestorePosition();RefreshPanel();if(!trayAdded)AddTray();}
-        if(w==2){TrackForeground();videoBridge::Poll();ReadFrames();resolution::Tick();}return 0;
+        if(w==1){if(panelVisible||picker)ReadSensors();if(panelVisible)RefreshPanel();if(!trayAdded)AddTray();}
+        if(w==2){
+            static ULONGLONG nextFramePoll=0;
+            const DWORD previousForeground=lastForeground;
+            TrackForeground();
+            const auto now=GetTickCount64();
+            if(now>=nextFramePoll||previousForeground!=lastForeground){
+                if(panelVisible)videoBridge::Poll();
+                ReadFrames();
+                nextFramePoll=now+475;
+            }
+            resolution::Tick();
+        }return 0;
+    case WM_HOTKEY:if(w==overlayHotkeyId)ToggleOverlay();return 0;
+    case WM_APP+18:ToggleOverlay();return 0;
     case WM_MOUSEACTIVATE:return MA_NOACTIVATE;
     case WM_MOUSEWHEEL:{int delta=(short)HIWORD(w);int count=0;for(const Sensor& s:sensors)if(s.selected)++count;
         scrollRow=Clamp(scrollRow+(delta>0?-3:3),0,std::max(0,count-1));RefreshPanel();return 0;}
@@ -742,7 +829,7 @@ static LRESULT CALLBACK PanelProc(HWND h,UINT m,WPARAM w,LPARAM l){
     case WM_DISPLAYCHANGE:RestorePosition();RefreshPanel();resolutionui::CurrentMode();return 0;
     case WM_CONTEXTMENU:ShowMenu();return 0;
     case WM_CLOSE:DestroyWindow(h);return 0;
-    case WM_DESTROY:resolution::Shutdown();DeleteTray();KillTimer(h,1);KillTimer(h,2);if(picker)DestroyWindow(picker);PostQuitMessage(0);return 0;
+    case WM_DESTROY:UnregisterHotKey(h,overlayHotkeyId);resolution::Shutdown();DeleteTray();KillTimer(h,1);KillTimer(h,2);if(picker)DestroyWindow(picker);PostQuitMessage(0);return 0;
     }return DefWindowProcW(h,m,w,l);
 }
 int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR command,int){
@@ -752,17 +839,12 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR command,int){
     wcscpy(folder,path);wchar_t* slash=wcsrchr(folder,L'\\');if(!slash)return 1;*slash=0;
     wcscpy(iniPath,path);wchar_t* dot=wcsrchr(iniPath,L'.');if(!dot)return 1;wcscpy(dot,L".ini");
     wcscpy(logPath,path);wcscpy(wcsrchr(logPath,L'.'),L".log");
-    wchar_t programFiles[MAX_PATH];DWORD n=GetEnvironmentVariableW(L"ProgramFiles(x86)",programFiles,MAX_PATH);
-    if(n&&n<MAX_PATH-64){
-        swprintf(afterburnerConfig,MAX_PATH,L"%ls\\MSI Afterburner\\MSIAfterburner.cfg",programFiles);
-        swprintf(afterburnerProfile,MAX_PATH,L"%ls\\MSI Afterburner\\Profiles\\MSIAfterburner.cfg",programFiles);
-    }
     HANDLE mutex=CreateMutexW(NULL,FALSE,L"Local\\AeroPanel.Standalone.v1");
     if(!mutex||GetLastError()==ERROR_ALREADY_EXISTS){
         HWND existing=FindWindowW(L"AeroPanelStandalone",NULL);
-        if(existing){if(wcsstr(command,L"--quit"))PostMessageW(existing,WM_CLOSE,0,0);else if(wcsstr(command,L"--api-admin"))PostMessageW(existing,WM_APP+17,0,0);else PostMessageW(existing,TRAY_MESSAGE,0,NIN_SELECT);}
+        if(existing){if(wcsstr(command,L"--toggle-overlay"))PostMessageW(existing,WM_APP+18,0,0);else if(wcsstr(command,L"--quit"))PostMessageW(existing,WM_CLOSE,0,0);else if(wcsstr(command,L"--api-admin"))PostMessageW(existing,WM_APP+17,0,0);else PostMessageW(existing,TRAY_MESSAGE,0,NIN_SELECT);}
         if(mutex)CloseHandle(mutex);return 0;}
-    if(wcsstr(command,L"--quit")){CloseHandle(mutex);return 0;}
+    if(wcsstr(command,L"--quit")||wcsstr(command,L"--toggle-overlay")){CloseHandle(mutex);return 0;}
     if(wcsstr(command,L"--smoke"))quitAt=GetTickCount64()+30000;
     const wchar_t* targetArg=wcsstr(command,L"--fps-pid=");
     if(targetArg){fpsTarget=wcstoul(targetArg+10,NULL,10);fixedFpsTarget=fpsTarget!=0;fpsTargetName=L"指定测试进程";}
@@ -787,13 +869,16 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR command,int){
                 bool listOk=SendMessageW(sensorList,LB_GETSELCOUNT,0,0)==1;
                 SendMessageW(picker,WM_COMMAND,13,0);
                 unsigned selected=0;for(const Sensor& s:sensors)if(s.selected)++selected;
-                bool saved=listOk && !followAfterburner && selected==1 && sensors[0].selected;
+                bool saved=listOk && selected==1 && sensors[0].selected;
                 Log(saved?L"PICKER CHECK PASS: real listbox selection saved to local INI and re-read as exactly one sensor.":L"PICKER CHECK FAIL: selection persistence mismatch.");
                 if(!saved)checkExit=4;
             }
         }
         DestroyWindow(panel);
     }else{
+        TryStartAfterburner();
+        StartHardware();
+        RegisterOverlayHotkey();
         videoBridge::Start();
         AddTray();RestorePosition();RefreshPanel();SetTimer(panel,1,interval,NULL);SetTimer(panel,2,250,NULL);
         if(wcsstr(command,L"--verify-tray")){
@@ -804,7 +889,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR command,int){
         if(wcsstr(command,L"--ui-smoke")||!wcsstr(command,L"--background"))OpenPicker();
         if(captureEnabled||wcsstr(command,L"--fps-smoke"))StartFrames();
     }
-    Log(L"Started: direct MAHMSharedMemory reader. No RTSS data or rendering dependency.");
+    Log(L"Started: LibreHardwareMonitor sensor reader.");
     MSG msg;int result;while((result=GetMessageW(&msg,NULL,0,0))>0){
         if(picker&&msg.message==WM_KEYDOWN&&(msg.hwnd==picker||IsChild(picker,msg.hwnd))&&
             (msg.wParam==VK_F11||(msg.wParam==VK_ESCAPE&&settingsFullscreen))){
@@ -814,6 +899,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR command,int){
     }
     if(wcsstr(command,L"--render-check")){SaveRenderDiagnostics();if(!VerifyCurveRendering())checkExit=5;}
     videoBridge::Stop();
+    StopApiChannel(apiBroker);
     StopFrames();
     PROCESS_MEMORY_COUNTERS_EX memory={};memory.cb=sizeof(memory);wchar_t stats[260];
     if(GetProcessMemoryInfo(GetCurrentProcess(),(PROCESS_MEMORY_COUNTERS*)&memory,sizeof(memory))){

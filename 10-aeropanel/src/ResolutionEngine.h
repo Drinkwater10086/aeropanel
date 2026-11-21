@@ -18,38 +18,69 @@ static ULONGLONG nextPoll=0,retryAt=0,previewUntil=0;
 static bool pendingRecovery=false,preview=false;
 static unsigned long pollCount=0;
 static std::vector<Config> foregroundRules;
-static constexpr size_t maxForegroundRules=24;
 static ULONGLONG nextDeltaScan=0;
 static Presence ruleDeltaGame=Presence::Unknown,ruleDeltaLauncher=Presence::Unknown;
-static void ReadForegroundRules(){
-    foregroundRules.clear();
-    for(size_t i=0;i<maxForegroundRules;++i){
-        auto key=std::to_wstring(i);
-        wchar_t text[1200]={};
-        GetPrivateProfileStringW(L"ForegroundResolution",key.c_str(),L"",text,1200,iniPath);
-        unsigned width=0,height=0,automatic=0;int end=0;
-        if(swscanf(text,L"%u,%u,%u,%n",&width,&height,&automatic,&end)!=3||
-           end<=0||!text[end]||width<320||width>16384||height<200||height>16384||automatic>1)continue;
-        Config rule;rule.platform=4;rule.enabled=true;rule.path=text+end;
-        if(rule.path.size()==8&&rule.path.rfind(L"@delta:",0)==0&&rule.path[7]>=L'0'&&rule.path[7]<=L'2'){
-            rule.platform=rule.path[7]-L'0';
-            rule.path.clear();
-        }
-        rule.width=(int)width;rule.height=(int)height;rule.automatic=automatic!=0;
-        foregroundRules.push_back(std::move(rule));
+static std::wstring RulesPath(){return std::wstring(iniPath)+L".rules";}
+static void ParseForegroundRule(const wchar_t* text,std::vector<Config>& rules){
+    unsigned width=0,height=0,automatic=0;int end=0;
+    if(swscanf(text,L"%u,%u,%u,%n",&width,&height,&automatic,&end)!=3||
+       end<=0||!text[end]||width<320||width>16384||height<200||height>16384||automatic>1)return;
+    Config rule;rule.platform=4;rule.enabled=true;rule.path=text+end;
+    if(rule.path.size()==8&&rule.path.rfind(L"@delta:",0)==0&&rule.path[7]>=L'0'&&rule.path[7]<=L'2'){
+        rule.platform=rule.path[7]-L'0';
+        rule.path.clear();
     }
+    rule.width=(int)width;rule.height=(int)height;rule.automatic=automatic!=0;
+    rules.push_back(std::move(rule));
+}
+static void ReadForegroundRules(){
+    std::vector<Config> loaded;
+    const auto path=RulesPath();
+    FILE* file=_wfopen(path.c_str(),L"rb");
+    if(file){
+        // UTF-16LE code units on Windows, one rule per line.
+        std::wstring line;
+        wchar_t buffer[1024];
+        size_t count;
+        while((count=fread(buffer,sizeof(wchar_t),1024,file))!=0){
+            for(size_t i=0;i<count;++i){
+                if(buffer[i]==L'\n'){ParseForegroundRule(line.c_str(),loaded);line.clear();}
+                else line+=buffer[i];
+            }
+        }
+        const bool ok=!ferror(file)&&line.empty();
+        fclose(file);
+        if(!ok){Log(L"Resolution: could not read the rule file.");return;}
+    }else{
+        DWORD attributes=GetFileAttributesW(path.c_str());
+        if(attributes!=INVALID_FILE_ATTRIBUTES||GetLastError()!=ERROR_FILE_NOT_FOUND){
+            Log(L"Resolution: could not open the rule file.");return;
+        }
+        // Existing installations used at most 24 numbered INI slots.
+        for(size_t i=0;i<24;++i){
+            const auto key=std::to_wstring(i);
+            wchar_t text[1200]={};
+            GetPrivateProfileStringW(L"ForegroundResolution",key.c_str(),L"",text,1200,iniPath);
+            ParseForegroundRule(text,loaded);
+        }
+    }
+    foregroundRules.swap(loaded);
 }
 static bool SaveForegroundRules(const std::vector<Config>& rules){
-    std::wstring data;
-    for(size_t i=0;i<rules.size();++i){
-        const auto& rule=rules[i];
-        data+=std::to_wstring(i)+L"="+std::to_wstring(rule.width)+L","+
-            std::to_wstring(rule.height)+L","+std::to_wstring(rule.automatic)+L","+(rule.platform<3?L"@delta:"+std::to_wstring(rule.platform):rule.path);
-        data.push_back(L'\0');
+    const auto path=RulesPath(),temp=path+L".tmp";
+    FILE* file=_wfopen(temp.c_str(),L"wb");
+    if(!file)return false;
+    bool ok=true;
+    for(const auto& rule:rules){
+        const auto target=rule.platform<3?L"@delta:"+std::to_wstring(rule.platform):rule.path;
+        const auto line=std::to_wstring(rule.width)+L","+std::to_wstring(rule.height)+L","+
+            std::to_wstring(rule.automatic)+L","+target+L"\n";
+        if(fwrite(line.data(),sizeof(wchar_t),line.size(),file)!=line.size()){ok=false;break;}
     }
-    data.push_back(L'\0');
-    if(rules.empty())data.push_back(L'\0');
-    if(!WritePrivateProfileSectionW(L"ForegroundResolution",data.c_str(),iniPath))return false;
+    if(fflush(file)||_commit(_fileno(file)))ok=false;
+    if(fclose(file))ok=false;
+    if(ok)ok=MoveFileExW(temp.c_str(),path.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=FALSE;
+    if(!ok){DeleteFileW(temp.c_str());return false;}
     foregroundRules=rules;
     nextPoll=retryAt=nextDeltaScan=0;
     return true;
@@ -143,8 +174,10 @@ static bool Calculate4x3(DWORD desktopHeight,int& width,int& height){
     width=height/3*4;
     return width>=320;
 }
-static bool FindMode(const Config& cfg,SavedMode& before,DEVMODEW& target,LONG& code){
-    code=DISP_CHANGE_BADMODE;if(!display.current(before)){code=DISP_CHANGE_FAILED;return false;}
+static bool FindMode(const Config& cfg,SavedMode& before,DEVMODEW& target,LONG& code,const SavedMode* baseline=nullptr){
+    code=DISP_CHANGE_BADMODE;
+    if(baseline)before=*baseline;
+    else if(!display.current(before)){code=DISP_CHANGE_FAILED;return false;}
     int width=cfg.width,height=cfg.height;
     if(cfg.automatic&&!Calculate4x3(before.mode.dmPelsHeight,width,height)){code=-100;return false;}
     if(width<320||width>16384||height<200||height>16384){code=-101;return false;}
@@ -176,6 +209,40 @@ static bool Apply(const Config& value,bool isPreview){
     if(code!=DISP_CHANGE_SUCCESSFUL){pendingRecovery=true;Note(L"切换失败，尝试恢复，代码 "+std::to_wstring(code));Restore();return false;}
     preview=isPreview;previewUntil=isPreview?GetTickCount64()+15000:0;
     Note(isPreview?L"试用中，15 秒后自动恢复":L"已切换为 "+std::to_wstring(target.dmPelsWidth)+L" × "+std::to_wstring(target.dmPelsHeight)+L" @ "+std::to_wstring(target.dmDisplayFrequency)+L" Hz");return true;
+}
+// Retain the original recovery record while moving between active rules.
+static bool SwitchActiveRule(const Config& value){
+    SavedMode baseline,current;
+    if(!LoadRecovery(baseline)){
+        pendingRecovery=true;
+        Note(L"恢复记录缺失或损坏，已暂停自动切换");
+        return false;
+    }
+    if(!display.current(current)||_wcsicmp(current.device,baseline.device)){
+        Note(L"主显示器已变化，尝试恢复原显示模式");
+        Restore();
+        return false;
+    }
+    DEVMODEW target={};LONG code;
+    if(!FindMode(value,baseline,target,code,&baseline)){
+        Note(L"新规则未通过模式验证，代码 "+std::to_wstring(code));
+        Restore();
+        return false;
+    }
+    const auto& actual=current.mode;
+    const bool sameMode=target.dmPelsWidth==actual.dmPelsWidth&&target.dmPelsHeight==actual.dmPelsHeight&&
+        target.dmDisplayFrequency==actual.dmDisplayFrequency&&target.dmBitsPerPel==actual.dmBitsPerPel;
+    if(!sameMode){
+        code=display.change(baseline.device,&target,NULL,0,NULL);
+        if(code!=DISP_CHANGE_SUCCESSFUL){
+            Note(L"切换新规则失败，代码 "+std::to_wstring(code));
+            Restore();
+            return false;
+        }
+    }
+    session=value;
+    Note(L"已应用新规则： "+std::to_wstring(target.dmPelsWidth)+L" × "+std::to_wstring(target.dmPelsHeight));
+    return true;
 }
 struct ProcessInfo {std::wstring name,path;DWORD session=0;bool identifiable=false;};
 static Presence MatchPath(const Config& cfg,const std::vector<ProcessInfo>& entries,DWORD ownSession){
@@ -243,7 +310,14 @@ static void Tick(){
             if(match&&!prioritizeDelta&&!_wcsicmp(match->path.c_str(),session.path.c_str())&&
                match->automatic==session.automatic&&match->width==session.width&&match->height==session.height)return;
             if(now<retryAt)return;
-            if(!Restore()){retryAt=now+5000;return;}
+            if(match){
+                if(SwitchActiveRule(*match)){
+                    if(prioritizeDelta)policy.Applied(ruleDeltaGame);
+                }else retryAt=now+3000;
+                return;
+            }
+            if(!Restore())retryAt=now+5000;
+            return;
         }
         if(match&&now>=retryAt){
             if(Apply(*match,false)){if(prioritizeDelta)policy.Applied(ruleDeltaGame);else policy.active=true;}

@@ -1,9 +1,15 @@
-﻿#pragma once
+#pragma once
 #include "ApiNames.h"
 struct ApiChannel {HANDLE process=NULL,pipe=NULL,stop=NULL;DWORD childPid=0;std::string pending;};
 static ApiChannel apiCollector,apiBroker;
-static HANDLE &apiProcess=apiCollector.process,&apiPipe=apiCollector.pipe,&apiStop=apiCollector.stop;
-static bool apiAdmin=false;
+static bool traceWanted=false,traceSent=false,traceFailed=false;
+static void StartApiChannel(ApiChannel& channel,bool broker,bool elevate=true);
+static bool apiAdmin=false,cpuVoltageEnabled=false;
+static int hardwareModeSent=0;
+static bool afterburnerReady=false;
+static ULONGLONG voltageReceived=0;
+static constexpr size_t hardwareFieldCount=14;
+static float hardwareValues[hardwareFieldCount];
 struct ApiEvidence {ULONGLONG created;unsigned mask;};
 static std::map<DWORD,ApiEvidence> apiEvidence;
 static void SaveApiEvidence(DWORD pid,const ApiEvidence& item){
@@ -51,17 +57,54 @@ static void ReadApiChannel(ApiChannel& channel){
     if(apiEvidence.size()<256||apiEvidence.count(pid)){auto& item=apiEvidence[pid];if(item.created!=created)item={created,0};
      unsigned previous=item.mask;item.mask|=mask;if(previous!=item.mask){SaveApiEvidence(pid,item);
       std::wstring message=L"Graphics API identified: "+apiidentity::Names(item.mask)+L" PID="+std::to_wstring(pid);Log(message.c_str());}}
-   }else if(&channel==&apiCollector&&line.rfind("STACK,",0)==0&&line.size()<4096&&ConnectedApi(apiBroker)){
+   }else if(&channel==&apiCollector&&line.rfind("STACK,",0)==0&&line.size()<4096&&apiAdmin&&ConnectedApi(apiBroker)){
     line+='\n';DWORD written=0;WriteFile(apiBroker.pipe,line.data(),(DWORD)line.size(),&written,NULL);
-   }else if(line=="ELEVATED,1")Log(L"Graphics API broker elevation verified.");
-   else if(&channel==&apiCollector&&line.rfind("PRESENT,",0)==0)ReadRawPresent(line);
+   }else if(&channel==&apiBroker&&line.rfind("HW,",0)==0){
+    float values[hardwareFieldCount];
+    const char* field=line.c_str()+3;
+    size_t count=0,valid=0;
+    while(count<hardwareFieldCount){
+     char* end=nullptr;
+     const float value=strtof(field,&end);
+     if(end==field||*end!=(count+1<hardwareFieldCount?',':'\0'))break;
+     values[count++]=value;
+     if(isfinite(value))++valid;
+     if(!*end)break;
+     field=end+1;
+    }
+    if(count==hardwareFieldCount){
+     if(!voltageReceived)Log((L"LibreHardwareMonitor hardware fields received: "+std::to_wstring(valid)+L"/14").c_str());
+     memcpy(hardwareValues,values,sizeof(values));
+     voltageReceived=GetTickCount64();
+    }
+   }else if(&channel==&apiBroker&&line=="HWERROR")Log(L"LibreHardwareMonitor hardware worker unavailable.");
+   else if(line=="ELEVATED,1")Log(L"Graphics API broker elevation verified.");
+   else if(&channel==&apiBroker&&line=="TRACE_READY,0"){traceFailed=true;Log(L"Combined API trace unavailable; starting ordinary fallback.");}
+   else if(line.rfind("PRESENT,",0)==0)ReadRawPresent(line);
    else if(line.rfind("PROVIDER,",0)==0){std::wstring message=L"API trace "+Wide(line.c_str(),line.size());Log(message.c_str());}
    else if(line=="READY,0")Log(L"Graphics API detection unavailable; retaining present-runtime fallback.");
   }
   if(channel.pending.size()>8192)channel.pending.clear();
  }
 }
-static void ReadApi(){ReadApiChannel(apiCollector);ReadApiChannel(apiBroker);}
+static void ReadApi(){
+ ReadApiChannel(apiCollector);ReadApiChannel(apiBroker);
+ const bool combine=traceWanted&&apiAdmin&&apiBroker.process&&!traceFailed;
+ if(combine!=traceSent&&ConnectedApi(apiBroker)){
+    const char* trace=combine?"TRACE,1\n":"TRACE,0\n";
+    DWORD written=0;
+    if(WriteFile(apiBroker.pipe,trace,8,&written,NULL)&&written==8)traceSent=combine;
+ }
+ if(traceWanted&&!combine&&!apiCollector.process)StartApiChannel(apiCollector,false);
+ const int mode=!panelVisible?0:afterburnerReady?(cpuVoltageEnabled?2:0):1;
+ if(!mode)voltageReceived=0;
+ if(mode!=hardwareModeSent&&ConnectedApi(apiBroker)){
+    const char* command=mode==2?"HARDWARE,2\n":mode==1?"HARDWARE,1\n":"HARDWARE,0\n";
+    DWORD written=0;
+    if(WriteFile(apiBroker.pipe,command,11,&written,NULL)&&written==11)
+        hardwareModeSent=mode;
+ }
+}
 static std::wstring DetectedApi(DWORD pid){
  auto found=apiEvidence.find(pid);if(found==apiEvidence.end())return L"";
  if(apiidentity::ProcessIdentity(pid)!=found->second.created){apiEvidence.erase(found);return L"";}
@@ -72,8 +115,8 @@ static void StopApiChannel(ApiChannel& channel){
  if(channel.process){if(WaitForSingleObject(channel.process,5000)==WAIT_TIMEOUT)Log(L"API worker still completing cleanup.");CloseHandle(channel.process);}
  if(channel.stop)CloseHandle(channel.stop);if(channel.pipe)CloseHandle(channel.pipe);channel={};
 }
-static void StopApi(){StopApiChannel(apiCollector);StopApiChannel(apiBroker);apiEvidence.clear();}
-static void StartApiChannel(ApiChannel& channel,bool broker,bool elevate=true){
+static void StopApi(){traceWanted=false;StopApiChannel(apiCollector);apiEvidence.clear();}
+static void StartApiChannel(ApiChannel& channel,bool broker,bool elevate){
  GUID guid;if(FAILED(CoCreateGuid(&guid)))return;wchar_t unique[48];StringFromGUID2(guid,unique,48);
  std::wstring pipeName=L"\\\\.\\pipe\\AeroPanel-API-"+std::wstring(unique),stopName=L"Local\\AeroPanel-API-Stop-"+std::wstring(unique);
  channel.pipe=CreateNamedPipeW(pipeName.c_str(),PIPE_ACCESS_DUPLEX|FILE_FLAG_FIRST_PIPE_INSTANCE,
@@ -90,8 +133,12 @@ static void StartApiChannel(ApiChannel& channel,bool broker,bool elevate=true){
    channel.process=pi.hProcess;channel.childPid=pi.dwProcessId;CloseHandle(pi.hThread);}}
  if(!channel.process)StopApiChannel(channel);
 }
+static void StartHardware(){
+ if(!apiBroker.process&&EnsureApiRuntime())StartApiChannel(apiBroker,true);
+}
 static void StartApi(){
- if(apiProcess||!EnsureApiRuntime())return;LoadApiEvidence();StartApiChannel(apiCollector,false);
- if(apiAdmin&&apiProcess)StartApiChannel(apiBroker,true);
- Log(L"Graphics API collector started; elevated broker performs module mapping only.");
+ if(traceWanted||!EnsureApiRuntime())return;
+ LoadApiEvidence();traceFailed=false;traceWanted=true;
+ if(!apiAdmin||!apiBroker.process)StartApiChannel(apiCollector,false);
+ Log(apiAdmin&&apiBroker.process?L"Graphics API collector uses the combined broker.":L"Graphics API collector started.");
 }

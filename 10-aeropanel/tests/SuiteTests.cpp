@@ -1,4 +1,4 @@
-﻿#define wWinMain SuiteEntryNotUsed
+#define wWinMain SuiteEntryNotUsed
 #include "../src/AeroPanel.cpp"
 #undef wWinMain
 #include <assert.h>
@@ -131,6 +131,18 @@ static void ForegroundRuleTests(){
     Check(policy.active&&fakeMode.mode.dmPelsWidth==2880,"foreground_first_rule_applies");
     fakeForegroundPath=b.path;nextPoll=0;Tick();
     Check(policy.active&&fakeMode.mode.dmPelsWidth==1920,"foreground_second_rule_applies");
+    SavedMode baseline;
+    Check(changed==2&&LoadRecovery(baseline)&&baseline.mode.dmPelsWidth==3840,
+        "foreground_rule_handoff_skips_desktop_and_retains_recovery");
+    fakeForegroundPath=a.path;nextPoll=0;Tick();
+    Check(policy.active&&fakeMode.mode.dmPelsWidth==2880&&fakeMode.mode.dmPelsHeight==2160,
+        "foreground_auto_rule_uses_original_height");
+    rejectCheck=true;
+    fakeForegroundPath=b.path;nextPoll=0;Tick();
+    Check(!policy.active&&fakeMode.mode.dmPelsWidth==3840&&!Exists(recoveryFile),
+        "foreground_unsupported_handoff_restores_desktop");
+    rejectCheck=false;retryAt=0;
+    fakeForegroundPath=b.path;nextPoll=0;Tick();
     fakeForegroundPath=L"C:\\other\\app.exe";nextPoll=0;Tick();
     Check(!policy.active&&fakeMode.mode.dmPelsWidth==3840&&!Exists(recoveryFile),"foreground_unmatched_full_path_restores_original");
     Config delta=a;delta.platform=2;delta.path.clear();
@@ -147,6 +159,19 @@ static void ForegroundRuleTests(){
     fakeDeltaGame=Presence::Absent;nextPoll=0;Tick();
     Check(!policy.active&&fakeMode.mode.dmPelsWidth==3840,"delta_rule_restores_on_game_exit");
     scanProcesses=Scan;
+    std::vector<Config> largeRules;
+    for(int i=0;i<200;++i){
+        Config rule=b;
+        rule.path=L"C:\\测试"+std::wstring(200,L'长')+std::to_wstring(i)+L".exe";
+        largeRules.push_back(std::move(rule));
+    }
+    Check(SaveForegroundRules(largeRules),"foreground_more_than_24_rules_save");
+    ReadForegroundRules();
+    Check(foregroundRules.size()==200&&MatchForegroundRule(largeRules.back().path),
+        "foreground_large_rule_file_round_trip");
+    Check(SaveForegroundRules({}),"foreground_empty_rule_file_save");
+    ReadForegroundRules();
+    Check(foregroundRules.empty(),"foreground_empty_file_stays_empty");
     foregroundExecutable=ForegroundExecutable;
     config=savedConfig;
     SaveForegroundRules(savedRules);
@@ -190,9 +215,9 @@ static void FrameTests(){
     apiEvidence[ownPid]={ownIdentity,16};Check(DetectedApi(ownPid)==L"D3D12","api_evidence_matches_process_creation_time");
     apiEvidence[ownPid]={ownIdentity+1,8};Check(DetectedApi(ownPid).empty(),"pid_reuse_cannot_reuse_old_api_evidence");
     Check(EnsureApiRuntime(),"single_exe_extracts_verified_api_detector");
-    StartApi();Check(apiProcess&&apiPipe&&apiStop,"api_detector_starts_with_owned_pipe_and_stop_event");
-    HANDLE detector=apiProcess;HANDLE detectorCopy=NULL;DuplicateHandle(GetCurrentProcess(),detector,GetCurrentProcess(),&detectorCopy,SYNCHRONIZE,FALSE,0);
-    StopApi();Check(!apiProcess&&!apiPipe&&!apiStop&&detectorCopy&&WaitForSingleObject(detectorCopy,0)==WAIT_OBJECT_0,"api_detector_stops_and_releases_handles");if(detectorCopy)CloseHandle(detectorCopy);
+    StartApi();Check(apiCollector.process&&apiCollector.pipe&&apiCollector.stop,"api_detector_starts_with_owned_pipe_and_stop_event");
+    HANDLE detector=apiCollector.process;HANDLE detectorCopy=NULL;DuplicateHandle(GetCurrentProcess(),detector,GetCurrentProcess(),&detectorCopy,SYNCHRONIZE,FALSE,0);
+    StopApi();Check(!apiCollector.process&&!apiCollector.pipe&&!apiCollector.stop&&detectorCopy&&WaitForSingleObject(detectorCopy,0)==WAIT_OBJECT_0,"api_detector_stops_and_releases_handles");if(detectorCopy)CloseHandle(detectorCopy);
     apiEvidence[ownPid]={ownIdentity,16};SaveApiEvidence(ownPid,apiEvidence[ownPid]);apiEvidence.clear();LoadApiEvidence();
     Check(DetectedApi(ownPid)==L"D3D12","verified_api_cache_survives_detector_restart");
     WritePrivateProfileStringW(L"APICache",std::to_wstring(ownPid).c_str(),(std::to_wstring(ownIdentity+1)+L",8").c_str(),iniPath);LoadApiEvidence();
@@ -230,10 +255,11 @@ static bool SaveSettingsPreview(HWND window){
     HBITMAP bitmap=CreateDIBSection(dc,&info,DIB_RGB_COLORS,&pixels,NULL,0);
     if(!dc||!bitmap){if(bitmap)DeleteObject(bitmap);if(dc)DeleteDC(dc);return false;}
     HGDIOBJ old=SelectObject(dc,bitmap);
+    SendMessageW(sensorList,LB_SETSEL,FALSE,-1);
     ShowWindow(window,SW_SHOWNOACTIVATE);UpdateWindow(window);
     PrintWindow(window,dc,PW_CLIENTONLY);GdiFlush();
     ShowWindow(window,SW_HIDE);
-    RECT list;GetWindowRect(sensorList,&list);POINT listPoint={list.right-5,(list.top+list.bottom)/2};ScreenToClient(window,&listPoint);
+    RECT list;GetWindowRect(sensorList,&list);POINT listPoint={list.right-GetSystemMetrics(SM_CXVSCROLL)-5,(list.top+list.bottom)/2};ScreenToClient(window,&listPoint);
     bool ok=GetPixel(dc,r.right-4,r.bottom-4)!=RGB(0,0,0)&&GetPixel(dc,listPoint.x,listPoint.y)==RGB(35,39,45);
     std::wstring path=std::wstring(folder)+L"\\settings-preview.bmp";FILE* file=_wfopen(path.c_str(),L"wb");
     if(file){BITMAPFILEHEADER header={};header.bfType=0x4D42;header.bfOffBits=sizeof(header)+sizeof(BITMAPINFOHEADER);

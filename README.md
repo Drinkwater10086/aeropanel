@@ -6,7 +6,7 @@
 
 ## 下载
 
-前往 [Releases](https://github.com/Drinkwater10086/aeropanel/releases/latest)，下载 `AeroPanel-v3.0.1-win32.zip`，解压到可写目录并运行 `AeroPanel.exe`。也可单独下载 EXE；第三方许可已内嵌，可从“关于 / 许可”查看。
+前往 [Releases](https://github.com/Drinkwater10086/aeropanel/releases/latest)，下载 `AeroPanel-v3.0.8-win-x64.zip`，解压到可写目录并运行 `AeroPanel.exe`。请保留 ZIP 中的 runtime 目录。发行包适用于 Windows x64。
 
 ## 两个板块
 
@@ -19,8 +19,8 @@
 
 ## 依赖与边界
 
-- 硬件传感器来自 **MSI Afterburner** 的共享数据，需要其运行并启用硬件监控。可跟随其 OSD 选择，或在 AeroPanel 内独立选择；只显示 Afterburner 实际提供的项目。
-- **不需要运行 RTSS。** AeroPanel 不会自动修改 Afterburner 或 RTSS 设置。如 Afterburner 仍自动启动 RTSS，需要自行检查其联动配置。
+- 启动时尝试打开已安装的 MSI Afterburner。共享数据可用时，它负责常规传感器，AOT 助手负责选用的主板 CPU 电压。共享数据不可用时，AOT 助手负责完整采集。
+- 帧率采集由 PresentMon 提供。可用 Ctrl + Alt + F10 显示或隐藏浮窗，隐藏期间暂停帧采集。
 - EXE 内嵌 **PresentMon 2.3.1**，首次运行验证并展开到 `runtime/PresentMon.exe`，由主程序管理帧采集子进程。因此单 EXE 交付不表示所有采集都在同一进程中。
 - 帧率读取依赖 ETW 权限和目标程序是否产生可捕获的呈现事件；受 ETW 丢事件影响，不保证与游戏内计数或其他基准完全一致。无有效新数据时显示 N/A。
 - 置顶基于 Windows 窗口机制，不能保证覆盖独占全屏游戏、系统安全桌面或其他特殊合成界面。
